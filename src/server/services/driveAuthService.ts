@@ -1,8 +1,7 @@
 import { google } from 'googleapis';
 import type { Credentials } from 'google-auth-library';
 import crypto from 'crypto';
-import fs from 'fs';
-import path from 'path';
+import { Redis } from '@upstash/redis';
 
 export interface UserSessionData {
   id: string;
@@ -18,14 +17,21 @@ export interface UserSessionData {
   createdAt: number;
 }
 
-// Session store directory and file path (ignored in .gitignore)
-const DATA_DIR = path.resolve(process.cwd(), '.data');
-const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
+export interface IRedisClient {
+  get<T = any>(key: string): Promise<T | null>;
+  set(key: string, value: any, opts?: { ex?: number }): Promise<any>;
+  del(key: string): Promise<any>;
+}
 
-// Session TTL: 14 days
-const SESSION_TTL_MS = 14 * 24 * 60 * 60 * 1000;
+// Session TTL: 14 days (in seconds and milliseconds)
+const SESSION_TTL_SECONDS = 14 * 24 * 60 * 60; // 1,209,600s
+const SESSION_TTL_MS = SESSION_TTL_SECONDS * 1000;
+
 // CSRF state TTL: 10 minutes
 const CSRF_TTL_MS = 10 * 60 * 1000;
+
+// Redis key prefix for isolated namespacing
+const REDIS_KEY_PREFIX = 'nova:session:';
 
 export class DriveAuthService {
   // Required scope: Read-only access to files and metadata
@@ -33,88 +39,98 @@ export class DriveAuthService {
   // while allowing NOVA STORAGE to index file names, sizes, checksums, and stream video content.
   public static readonly REQUIRED_SCOPE = 'https://www.googleapis.com/auth/drive.readonly';
 
-  // In-memory cache of sessions
-  private static sessionStore = new Map<string, UserSessionData>();
-  private static isInitialized = false;
+  // Configurable / mockable Redis client for tests and dependency injection
+  private static customRedisClient: IRedisClient | null = null;
+
+  // In-memory isolated store strictly for non-production environments (development / test without Upstash)
+  private static inMemoryDevStore: Map<string, { data: string; expiresAt: number }> | null = null;
+  private static warnedDevFallback = false;
 
   /**
-   * Initializes session store from disk cache if present
+   * Allows injecting a custom or mock Redis client (e.g. in automated unit tests)
    */
-  private static ensureInitialized(): void {
-    if (this.isInitialized) return;
-    this.isInitialized = true;
-
-    try {
-      if (fs.existsSync(SESSIONS_FILE)) {
-        const raw = fs.readFileSync(SESSIONS_FILE, 'utf-8');
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) {
-          const now = Date.now();
-          for (const item of parsed) {
-            // Only load non-expired sessions
-            if (item && item.id && now - (item.lastActivityAt || 0) < SESSION_TTL_MS) {
-              this.sessionStore.set(item.id, item);
-            }
-          }
-        }
-      }
-    } catch (e) {
-      console.warn('[NOVA STORAGE] Aviso: Falha ao carregar sessões em disco, iniciando em memória.', e);
-    }
+  public static setRedisClient(client: IRedisClient | null): void {
+    this.customRedisClient = client;
   }
 
   /**
-   * Persists active sessions to secure local file using atomic write.
-   * If writing or renaming fails, any temporary file is cleaned up,
-   * without deleting or corrupting the existing sessions file.
+   * Resets the non-production in-memory store (useful between test cases)
    */
-  private static saveSessionsToDisk(): void {
-    let tempFile: string | null = null;
-    try {
-      if (!fs.existsSync(DATA_DIR)) {
-        fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
-      }
-      const data = Array.from(this.sessionStore.values());
-      tempFile = path.join(DATA_DIR, `sessions.${Date.now()}.${crypto.randomBytes(4).toString('hex')}.tmp`);
-      fs.writeFileSync(tempFile, JSON.stringify(data, null, 2), { mode: 0o600 });
-      fs.renameSync(tempFile, SESSIONS_FILE);
-      tempFile = null;
-    } catch (e: any) {
-      if (tempFile) {
-        try {
-          if (fs.existsSync(tempFile)) {
-            fs.unlinkSync(tempFile);
-          }
-        } catch {
-          // ignore cleanup errors
-        }
-      }
-      console.warn('[NOVA STORAGE] Aviso: Falha ao persistir sessões em disco.', e?.message || 'Erro desconhecido');
+  public static resetInMemoryDevStore(): void {
+    if (this.inMemoryDevStore) {
+      this.inMemoryDevStore.clear();
     }
+    this.warnedDevFallback = false;
   }
 
   /**
-   * Cleans up expired sessions and stale CSRF tokens
+   * Resolves the active Redis client with strict enforcement:
+   * - In production: KV_REST_API_URL and KV_REST_API_TOKEN are mandatory. Missing variables throw a controlled error.
+   * - In development/test: If env vars are absent and no custom client was set, uses an isolated in-memory store.
    */
-  public static pruneExpiredSessions(): void {
-    this.ensureInitialized();
-    const now = Date.now();
-    let changed = false;
+  public static getRedisClient(): IRedisClient {
+    if (this.customRedisClient) {
+      return this.customRedisClient;
+    }
 
-    for (const [id, session] of this.sessionStore.entries()) {
-      if (now - session.lastActivityAt > SESSION_TTL_MS) {
-        this.sessionStore.delete(id);
-        changed = true;
-      } else if (session.csrfExpiresAt && now > session.csrfExpiresAt) {
-        session.csrfState = null;
-        session.csrfExpiresAt = null;
-        changed = true;
+    const isProduction = process.env.NODE_ENV === 'production';
+    const url = process.env.KV_REST_API_URL?.trim();
+    const token = process.env.KV_REST_API_TOKEN?.trim();
+
+    if (url && token) {
+      return new Redis({ url, token });
+    }
+
+    if (isProduction) {
+      throw new Error(
+        'Configuração obrigatória ausente em produção: KV_REST_API_URL e KV_REST_API_TOKEN devem estar configurados para conexão com o Upstash Redis.'
+      );
+    }
+
+    // Isolated fallback ONLY for development and test environments
+    if (!this.inMemoryDevStore) {
+      this.inMemoryDevStore = new Map();
+    }
+
+    if (!this.warnedDevFallback) {
+      console.warn(
+        '[NOVA STORAGE DEV/TEST] Variáveis KV_REST_API_URL e KV_REST_API_TOKEN não encontradas. Utilizando armazenamento temporário isolado em memória (bloqueado em produção).'
+      );
+      this.warnedDevFallback = true;
+    }
+
+    const store = this.inMemoryDevStore;
+
+    return {
+      get: async <T>(key: string): Promise<T | null> => {
+        const entry = store.get(key);
+        if (!entry) return null;
+        if (Date.now() > entry.expiresAt) {
+          store.delete(key);
+          return null;
+        }
+        return JSON.parse(entry.data) as T;
+      },
+      set: async (key: string, value: any, opts?: { ex?: number }): Promise<'OK'> => {
+        const ttlMs = (opts?.ex || SESSION_TTL_SECONDS) * 1000;
+        store.set(key, {
+          data: JSON.stringify(value),
+          expiresAt: Date.now() + ttlMs
+        });
+        return 'OK';
+      },
+      del: async (key: string): Promise<number> => {
+        const existed = store.delete(key);
+        return existed ? 1 : 0;
       }
-    }
+    };
+  }
 
-    if (changed) {
-      this.saveSessionsToDisk();
-    }
+  /**
+   * Formats the Redis key with the standard prefix
+   */
+  private static getSessionKey(sessionId: string): string {
+    return `${REDIS_KEY_PREFIX}${sessionId}`;
   }
 
   /**
@@ -140,33 +156,62 @@ export class DriveAuthService {
   }
 
   /**
-   * Retrieves an existing valid session, or null if invalid or expired
+   * Retrieves an existing valid session from Upstash Redis, or null if invalid or expired.
+   * Renews TTL on active access.
    */
-  public static getValidSession(sessionId: string): UserSessionData | null {
+  public static async getValidSession(sessionId: string): Promise<UserSessionData | null> {
     if (!sessionId || typeof sessionId !== 'string' || sessionId.length < 32) {
       return null;
     }
-    this.ensureInitialized();
-    this.pruneExpiredSessions();
 
-    const session = this.sessionStore.get(sessionId);
-    if (!session) return null;
+    const key = this.getSessionKey(sessionId);
+    const redis = this.getRedisClient();
 
-    if (Date.now() - session.lastActivityAt > SESSION_TTL_MS) {
-      this.sessionStore.delete(sessionId);
-      this.saveSessionsToDisk();
+    let session: UserSessionData | null = null;
+    try {
+      session = await redis.get<UserSessionData>(key);
+    } catch (err: any) {
+      console.error('[NOVA STORAGE] Falha ao recuperar sessão do Redis:', err?.message || 'Erro desconhecido');
+      throw new Error('Falha na comunicação com o serviço de sessões (Redis indisponível).');
+    }
+
+    if (!session) {
       return null;
     }
 
-    session.lastActivityAt = Date.now();
+    const now = Date.now();
+    // Validate session lifespan against lastActivityAt
+    if (now - (session.lastActivityAt || 0) > SESSION_TTL_MS) {
+      try {
+        await redis.del(key);
+      } catch {
+        // Ignora erro de exclusão em sessão já expirada
+      }
+      return null;
+    }
+
+    // Clean up expired CSRF state if past CSRF timeout
+    if (session.csrfExpiresAt && now > session.csrfExpiresAt) {
+      session.csrfState = null;
+      session.csrfExpiresAt = null;
+    }
+
+    // Update activity timestamp and refresh Redis TTL
+    session.lastActivityAt = now;
+    try {
+      await redis.set(key, session, { ex: SESSION_TTL_SECONDS });
+    } catch (err: any) {
+      console.error('[NOVA STORAGE] Falha ao renovar TTL da sessão no Redis:', err?.message || 'Erro desconhecido');
+      throw new Error('Falha na persistência da sessão no Redis.');
+    }
+
     return session;
   }
 
   /**
-   * Creates a new cryptographically random session
+   * Creates a new cryptographically random session and stores it in Upstash Redis
    */
-  public static createSession(): UserSessionData {
-    this.ensureInitialized();
+  public static async createSession(): Promise<UserSessionData> {
     const sessionId = crypto.randomBytes(32).toString('hex');
     const now = Date.now();
 
@@ -184,9 +229,68 @@ export class DriveAuthService {
       createdAt: now
     };
 
-    this.sessionStore.set(sessionId, newSession);
-    this.saveSessionsToDisk();
+    await this.saveSession(newSession);
     return newSession;
+  }
+
+  /**
+   * Persists the session state directly to Upstash Redis with 14 days TTL.
+   * Throws a controlled error if Redis is unreachable.
+   */
+  public static async saveSession(session: UserSessionData): Promise<void> {
+    if (!session || !session.id) {
+      throw new Error('Sessão inválida para gravação.');
+    }
+
+    const key = this.getSessionKey(session.id);
+    const redis = this.getRedisClient();
+
+    try {
+      await redis.set(key, session, { ex: SESSION_TTL_SECONDS });
+    } catch (err: any) {
+      console.error('[NOVA STORAGE] Falha ao persistir sessão no Redis:', err?.message || 'Erro desconhecido');
+      throw new Error('Falha na comunicação com o serviço de sessões (Upstash Redis indisponível).');
+    }
+  }
+
+  /**
+   * Updates session tokens ensuring existing fields (scope, token_type, refresh_token, etc.)
+   * are preserved when new values are undefined or absent, while supporting legitimate
+   * refresh_token rotation from Google. Never exposes tokens in logs or responses.
+   */
+  public static async updateSessionTokens(session: UserSessionData, newTokens: Credentials): Promise<void> {
+    const existingTokens = session.tokens || {};
+
+    // Do not let undefined values in newTokens overwrite existing defined fields
+    const validNewTokens: Partial<Credentials> = {};
+    for (const [key, value] of Object.entries(newTokens)) {
+      if (value !== undefined) {
+        (validNewTokens as any)[key] = value;
+      }
+    }
+
+    const mergedTokens: Credentials = {
+      ...existingTokens,
+      ...validNewTokens
+    };
+
+    // Explicitly guarantee refresh_token preservation unless Google provided a new valid refresh_token
+    const newRefreshToken = typeof newTokens.refresh_token === 'string' && newTokens.refresh_token.trim().length > 0
+      ? newTokens.refresh_token.trim()
+      : undefined;
+
+    if (newRefreshToken) {
+      mergedTokens.refresh_token = newRefreshToken;
+    } else if (existingTokens.refresh_token) {
+      mergedTokens.refresh_token = existingTokens.refresh_token;
+    } else {
+      delete mergedTokens.refresh_token;
+    }
+
+    session.tokens = mergedTokens;
+    session.lastActivityAt = Date.now();
+
+    await this.saveSession(session);
   }
 
   /**
@@ -229,48 +333,9 @@ export class DriveAuthService {
   }
 
   /**
-   * Updates session tokens ensuring existing fields (scope, token_type, refresh_token, etc.)
-   * are preserved when new values are undefined or absent, while supporting legitimate
-   * refresh_token rotation from Google.
-   */
-  public static updateSessionTokens(session: UserSessionData, newTokens: Credentials): void {
-    const existingTokens = session.tokens || {};
-
-    // Do not let undefined values in newTokens overwrite existing defined fields
-    const validNewTokens: Partial<Credentials> = {};
-    for (const [key, value] of Object.entries(newTokens)) {
-      if (value !== undefined) {
-        (validNewTokens as any)[key] = value;
-      }
-    }
-
-    const mergedTokens: Credentials = {
-      ...existingTokens,
-      ...validNewTokens
-    };
-
-    // Explicitly guarantee refresh_token preservation unless Google provided a new valid refresh_token
-    const newRefreshToken = typeof newTokens.refresh_token === 'string' && newTokens.refresh_token.trim().length > 0
-      ? newTokens.refresh_token.trim()
-      : undefined;
-
-    if (newRefreshToken) {
-      mergedTokens.refresh_token = newRefreshToken;
-    } else if (existingTokens.refresh_token) {
-      mergedTokens.refresh_token = existingTokens.refresh_token;
-    } else {
-      delete mergedTokens.refresh_token;
-    }
-
-    session.tokens = mergedTokens;
-    session.lastActivityAt = Date.now();
-    this.saveSessionsToDisk();
-  }
-
-  /**
    * Creates an authenticated OAuth2 client with token-refresh listener attached.
    * Ensures that any token refresh triggered during API calls (e.g. getStatus, listFiles)
-   * preserves the existing refresh_token and commits the update to session storage.
+   * preserves the existing refresh_token and commits the update to Upstash Redis.
    */
   public static getAuthenticatedClient(session: UserSessionData): any {
     const oauth2Client = this.getOAuth2Client();
@@ -280,19 +345,21 @@ export class DriveAuthService {
     oauth2Client.setCredentials(session.tokens);
 
     oauth2Client.on('tokens', (newTokens: Credentials) => {
-      DriveAuthService.updateSessionTokens(session, newTokens);
+      DriveAuthService.updateSessionTokens(session, newTokens).catch((err: any) => {
+        console.error('[NOVA STORAGE] Falha ao persistir tokens atualizados no Redis:', err?.message || 'Erro desconhecido');
+      });
     });
 
     return oauth2Client;
   }
 
   /**
-   * Generates authorization URL with CSRF state protection tied to the session
+   * Generates authorization URL with CSRF state protection tied to the session and saved in Redis
    */
-  public static generateAuthorizationUrl(
+  public static async generateAuthorizationUrl(
     session: UserSessionData,
     targetFolderId?: string
-  ): { authUrl: string; state: string } {
+  ): Promise<{ authUrl: string; state: string }> {
     const { configured } = this.areCredentialsConfigured();
     if (!configured) {
       throw new Error(
@@ -309,7 +376,7 @@ export class DriveAuthService {
       session.targetFolderId = targetFolderId.trim();
     }
 
-    this.saveSessionsToDisk();
+    await this.saveSession(session);
 
     const oauth2Client = this.getOAuth2Client();
 
@@ -325,7 +392,8 @@ export class DriveAuthService {
   }
 
   /**
-   * Handles the OAuth callback, strictly validates CSRF state, and retrieves tokens
+   * Handles the OAuth callback, strictly validates CSRF state, and retrieves tokens.
+   * State and tokens are persisted to Upstash Redis.
    */
   public static async handleCallback(
     session: UserSessionData,
@@ -338,7 +406,7 @@ export class DriveAuthService {
     if (!session.csrfState || session.csrfState !== state) {
       session.csrfState = null;
       session.csrfExpiresAt = null;
-      this.saveSessionsToDisk();
+      await this.saveSession(session).catch(() => {});
       return {
         success: false,
         error: 'Validação CSRF falhou: o parâmetro state recebido é inválido.'
@@ -348,7 +416,7 @@ export class DriveAuthService {
     if (session.csrfExpiresAt && now > session.csrfExpiresAt) {
       session.csrfState = null;
       session.csrfExpiresAt = null;
-      this.saveSessionsToDisk();
+      await this.saveSession(session).catch(() => {});
       return {
         success: false,
         error: 'Validação CSRF falhou: a solicitação de autorização expirou (tempo limite de 10 minutos).'
@@ -387,7 +455,7 @@ export class DriveAuthService {
       session.lastVerifiedAt = new Date().toISOString();
       session.lastActivityAt = Date.now();
 
-      this.saveSessionsToDisk();
+      await this.saveSession(session);
 
       return {
         success: true,
@@ -402,7 +470,8 @@ export class DriveAuthService {
   }
 
   /**
-   * Verifies connection state by testing real API connectivity if tokens exist
+   * Verifies connection state by testing real API connectivity if tokens exist.
+   * Updates lastVerifiedAt in Upstash Redis.
    */
   public static async getStatus(session: UserSessionData): Promise<{
     configured: boolean;
@@ -456,7 +525,7 @@ export class DriveAuthService {
       session.lastActivityAt = Date.now();
       const user = about.data.user;
 
-      DriveAuthService.saveSessionsToDisk();
+      await this.saveSession(session);
 
       return {
         configured: true,
@@ -487,8 +556,8 @@ export class DriveAuthService {
 
   /**
    * Lists real video files from Google Drive
-   * CRITICAL: If not connected or folder does not exist, returns empty list with explicit error
-   * Never invents files!
+   * CRITICAL: If not connected or folder does not exist, returns empty list with explicit error.
+   * Never invents files or leaks tokens!
    */
   public static async listFiles(
     session: UserSessionData,
@@ -583,6 +652,8 @@ export class DriveAuthService {
       }));
 
       session.lastActivityAt = Date.now();
+      await this.saveSession(session).catch(() => {});
+
       return {
         files: mappedFiles,
         nextPageToken: response.data.nextPageToken || null,
@@ -600,7 +671,7 @@ export class DriveAuthService {
   }
 
   /**
-   * Disconnect and revoke tokens for a session
+   * Disconnect and revoke tokens for a session, updating Upstash Redis
    */
   public static async disconnect(session: UserSessionData): Promise<boolean> {
     if (session.tokens?.access_token) {
@@ -609,7 +680,7 @@ export class DriveAuthService {
         oauth2Client.setCredentials(session.tokens);
         await oauth2Client.revokeCredentials();
       } catch {
-        // Ignore revocation errors if already expired
+        // Ignore revocation errors if already expired or revoked remotely
       }
     }
 
@@ -621,7 +692,7 @@ export class DriveAuthService {
     session.targetFolderId = null;
     session.lastActivityAt = Date.now();
 
-    this.saveSessionsToDisk();
+    await this.saveSession(session);
     return true;
   }
 }

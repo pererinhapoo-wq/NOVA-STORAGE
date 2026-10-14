@@ -8,21 +8,21 @@ export const driveRouter = express.Router();
 const COOKIE_NAME = 'nova_session_id';
 
 /**
- * Retrieves the validated session or initializes a new secure signed session
+ * Retrieves the validated session from Upstash Redis or initializes a new secure signed session
  */
-function getOrInitSession(req: Request, res: Response): UserSessionData {
+async function getOrInitSession(req: Request, res: Response): Promise<UserSessionData> {
   // Read ONLY from cryptographically signed cookie, ignoring unverified client headers
   const signedSessionId = req.signedCookies?.[COOKIE_NAME];
 
   if (signedSessionId && typeof signedSessionId === 'string') {
-    const existingSession = DriveAuthService.getValidSession(signedSessionId);
+    const existingSession = await DriveAuthService.getValidSession(signedSessionId);
     if (existingSession) {
       return existingSession;
     }
   }
 
-  // Create new session and issue signed httpOnly cookie
-  const newSession = DriveAuthService.createSession();
+  // Create new session in Upstash Redis and issue signed httpOnly cookie
+  const newSession = await DriveAuthService.createSession();
   res.cookie(COOKIE_NAME, newSession.id, {
     signed: true,
     httpOnly: true,
@@ -40,9 +40,8 @@ function getOrInitSession(req: Request, res: Response): UserSessionData {
  * Returns real state of Google Drive connection and OAuth configuration
  */
 driveRouter.get('/drive/status', async (req: Request, res: Response) => {
-  const session = getOrInitSession(req, res);
-
   try {
+    const session = await getOrInitSession(req, res);
     const status = await DriveAuthService.getStatus(session);
     res.status(200).json(status);
   } catch (error: any) {
@@ -60,12 +59,12 @@ driveRouter.get('/drive/status', async (req: Request, res: Response) => {
  * GET /api/storage/drive/auth-url
  * Generates Google OAuth 2.0 authorization URL with CSRF protection for popup
  */
-driveRouter.get('/drive/auth-url', (req: Request, res: Response) => {
-  const session = getOrInitSession(req, res);
-  const targetFolderId = req.query.folderId as string | undefined;
-
+driveRouter.get('/drive/auth-url', async (req: Request, res: Response) => {
   try {
-    const { authUrl, state } = DriveAuthService.generateAuthorizationUrl(
+    const session = await getOrInitSession(req, res);
+    const targetFolderId = req.query.folderId as string | undefined;
+
+    const { authUrl, state } = await DriveAuthService.generateAuthorizationUrl(
       session,
       targetFolderId
     );
@@ -90,7 +89,6 @@ driveRouter.get('/drive/auth-url', (req: Request, res: Response) => {
  * Uses postMessage targeted to explicit trusted origin and closes popup cleanly.
  */
 driveRouter.get('/drive/callback', async (req: Request, res: Response) => {
-  const session = getOrInitSession(req, res);
   const code = req.query.code as string | undefined;
   const state = req.query.state as string | undefined;
   const oauthError = req.query.error as string | undefined;
@@ -136,6 +134,26 @@ driveRouter.get('/drive/callback', async (req: Request, res: Response) => {
         </head>
         <body>
           <h3>Parâmetros ausentes no retorno OAuth (code ou state ausentes).</h3>
+        </body>
+      </html>
+    `);
+    return;
+  }
+
+  let session: UserSessionData;
+  try {
+    session = await getOrInitSession(req, res);
+  } catch (err: any) {
+    res.status(500).send(`
+      <!DOCTYPE html>
+      <html lang="pt-BR">
+        <head>
+          <meta charset="UTF-8">
+          <title>NOVA STORAGE - Erro de Sessão</title>
+          <style>body { background: #090a0d; color: #f87171; font-family: sans-serif; text-align: center; padding-top: 5rem; }</style>
+        </head>
+        <body>
+          <h3>Falha ao carregar sessão para autenticação OAuth.</h3>
         </body>
       </html>
     `);
@@ -213,12 +231,12 @@ driveRouter.get('/drive/callback', async (req: Request, res: Response) => {
  * If not connected, returns empty list with explicit status: "not_configured"
  */
 driveRouter.get('/drive/files', async (req: Request, res: Response) => {
-  const session = getOrInitSession(req, res);
   const folderId = req.query.folderId as string | undefined;
   const pageToken = req.query.pageToken as string | undefined;
   const pageSize = req.query.pageSize ? parseInt(req.query.pageSize as string, 10) : 50;
 
   try {
+    const session = await getOrInitSession(req, res);
     const result = await DriveAuthService.listFiles(session, {
       folderId,
       pageSize,
@@ -246,15 +264,17 @@ driveRouter.get('/drive/files', async (req: Request, res: Response) => {
  * Tests connection readiness on the backend against real Drive API if tokens exist
  */
 driveRouter.post('/drive/test-connection', async (req: Request, res: Response) => {
-  const session = getOrInitSession(req, res);
   const { clientId, targetFolderId } = req.body || {};
 
-  // If client provided a folderId, update it in session
-  if (targetFolderId) {
-    session.targetFolderId = targetFolderId.trim();
-  }
-
   try {
+    const session = await getOrInitSession(req, res);
+
+    // If client provided a folderId, update it in session
+    if (targetFolderId) {
+      session.targetFolderId = targetFolderId.trim();
+      await DriveAuthService.saveSession(session);
+    }
+
     const status = await DriveAuthService.getStatus(session);
 
     if (status.status === 'connected') {
@@ -313,11 +333,18 @@ driveRouter.post('/drive/test-connection', async (req: Request, res: Response) =
  * Disconnects Google Drive, revokes tokens and resets session
  */
 driveRouter.post('/drive/disconnect', async (req: Request, res: Response) => {
-  const session = getOrInitSession(req, res);
-  await DriveAuthService.disconnect(session);
+  try {
+    const session = await getOrInitSession(req, res);
+    await DriveAuthService.disconnect(session);
 
-  res.status(200).json({
-    success: true,
-    message: 'Google Drive desconectado da sessão com sucesso.'
-  });
+    res.status(200).json({
+      success: true,
+      message: 'Google Drive desconectado da sessão com sucesso.'
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Erro ao desconectar Google Drive.'
+    });
+  }
 });

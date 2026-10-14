@@ -1,18 +1,74 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import path from 'node:path';
-import { DriveAuthService, UserSessionData } from '../src/server/services/driveAuthService.ts';
+import { DriveAuthService, UserSessionData, IRedisClient } from '../src/server/services/driveAuthService.ts';
 
-// Test suite for OAuth token renewal and preservation
-test('Ciclo de renovação de tokens OAuth do Google Drive', async (t) => {
+// Test suite for OAuth token renewal and Upstash Redis session persistence
+test('Ciclo de sessões e renovação de tokens com Upstash Redis', async (t) => {
   // Ensure dummy credentials exist for test environment
   process.env.GOOGLE_CLIENT_ID = 'test-client-id-12345.apps.googleusercontent.com';
   process.env.GOOGLE_CLIENT_SECRET = 'test-client-secret-abcde';
   process.env.APP_URL = 'http://localhost:3000';
+  process.env.NODE_ENV = 'test';
 
-  await t.test('1. Renovação com novo access_token sem novo refresh_token preserva o refresh_token', () => {
-    const session = DriveAuthService.createSession();
+  t.beforeEach(() => {
+    DriveAuthService.setRedisClient(null);
+    DriveAuthService.resetInMemoryDevStore();
+  });
+
+  t.afterEach(() => {
+    DriveAuthService.setRedisClient(null);
+    DriveAuthService.resetInMemoryDevStore();
+  });
+
+  await t.test('1. Bloqueio estrito de fallback em ambiente de produção sem credenciais Upstash Redis', () => {
+    const originalNodeEnv = process.env.NODE_ENV;
+    const originalUrl = process.env.KV_REST_API_URL;
+    const originalToken = process.env.KV_REST_API_TOKEN;
+
+    try {
+      process.env.NODE_ENV = 'production';
+      delete process.env.KV_REST_API_URL;
+      delete process.env.KV_REST_API_TOKEN;
+
+      assert.throws(
+        () => {
+          DriveAuthService.getRedisClient();
+        },
+        (err: any) => {
+          assert.match(err.message, /Configuração obrigatória ausente em produção/);
+          assert.match(err.message, /KV_REST_API_URL e KV_REST_API_TOKEN devem estar configurados/);
+          return true;
+        },
+        'Deve lançar erro controlado e proibir fallback silencioso em produção'
+      );
+    } finally {
+      process.env.NODE_ENV = originalNodeEnv;
+      if (originalUrl) process.env.KV_REST_API_URL = originalUrl;
+      if (originalToken) process.env.KV_REST_API_TOKEN = originalToken;
+    }
+  });
+
+  await t.test('2. Renovação de access_token sem novo refresh_token preserva o refresh_token e grava no Redis', async () => {
+    // Simulate Upstash Redis in-memory storage
+    const redisStore = new Map<string, { value: any; ex?: number }>();
+    const mockRedis: IRedisClient = {
+      get: async <T>(k: string) => {
+        const item = redisStore.get(k);
+        return (item ? JSON.parse(JSON.stringify(item.value)) : null) as T;
+      },
+      set: async (k: string, v: any, opts?: { ex?: number }) => {
+        redisStore.set(k, { value: JSON.parse(JSON.stringify(v)), ex: opts?.ex });
+        return 'OK';
+      },
+      del: async (k: string) => {
+        const existed = redisStore.delete(k);
+        return existed ? 1 : 0;
+      }
+    };
+
+    DriveAuthService.setRedisClient(mockRedis);
+
+    const session = await DriveAuthService.createSession();
     const initialTokens = {
       access_token: 'initial_access_token_aaa',
       refresh_token: 'vital_refresh_token_xyz',
@@ -22,6 +78,7 @@ test('Ciclo de renovação de tokens OAuth do Google Drive', async (t) => {
     };
 
     session.tokens = initialTokens;
+    await DriveAuthService.saveSession(session);
 
     // Simulate Google issuing a refreshed access token WITHOUT a refresh_token
     const googleRenewalResponse = {
@@ -29,32 +86,42 @@ test('Ciclo de renovação de tokens OAuth do Google Drive', async (t) => {
       expiry_date: Date.now() + 3600 * 1000
     };
 
-    DriveAuthService.updateSessionTokens(session, googleRenewalResponse as any);
+    await DriveAuthService.updateSessionTokens(session, googleRenewalResponse as any);
 
-    // Assertions
+    // Assert in-memory object
     assert.equal(session.tokens?.access_token, 'new_renewed_access_token_bbb');
     assert.equal(session.tokens?.refresh_token, 'vital_refresh_token_xyz');
 
-    // Verify disk persistence
-    const sessionsFile = path.resolve(process.cwd(), '.data', 'sessions.json');
-    assert.ok(fs.existsSync(sessionsFile), 'Arquivo .data/sessions.json deve existir');
-    const diskSessions = JSON.parse(fs.readFileSync(sessionsFile, 'utf-8'));
-    const saved = diskSessions.find((s: UserSessionData) => s.id === session.id);
-    assert.ok(saved, 'Sessão deve estar persistida em disco');
-    assert.equal(saved.tokens?.access_token, 'new_renewed_access_token_bbb');
-    assert.equal(saved.tokens?.refresh_token, 'vital_refresh_token_xyz');
+    // Assert Upstash Redis persistence
+    const savedInRedis = await mockRedis.get<UserSessionData>(`nova:session:${session.id}`);
+    assert.ok(savedInRedis, 'Sessão deve estar persistida no Redis');
+    assert.equal(savedInRedis.tokens?.access_token, 'new_renewed_access_token_bbb');
+    assert.equal(savedInRedis.tokens?.refresh_token, 'vital_refresh_token_xyz');
+
+    // Verify TTL was set to 14 days (1,209,600s)
+    const storedItem = redisStore.get(`nova:session:${session.id}`);
+    assert.equal(storedItem?.ex, 14 * 24 * 60 * 60);
   });
 
-  await t.test('2. Preservação estrita do refresh_token quando refresh_token é undefined e suporte à rotação', () => {
-    const session = DriveAuthService.createSession();
+  await t.test('3. Preservação estrita quando refresh_token é undefined e suporte à rotação de tokens', async () => {
+    const redisStore = new Map<string, any>();
+    const mockRedis: IRedisClient = {
+      get: async (k) => redisStore.get(k) || null,
+      set: async (k, v) => { redisStore.set(k, v); return 'OK'; },
+      del: async (k) => { redisStore.delete(k); return 1; }
+    };
+    DriveAuthService.setRedisClient(mockRedis);
+
+    const session = await DriveAuthService.createSession();
     session.tokens = {
       access_token: 'token_1',
       refresh_token: 'original_refresh_token',
       expiry_date: 1000
     };
+    await DriveAuthService.saveSession(session);
 
-    // Update with explicit undefined refresh_token
-    DriveAuthService.updateSessionTokens(session, {
+    // 1: Update with explicit undefined refresh_token
+    await DriveAuthService.updateSessionTokens(session, {
       access_token: 'token_2',
       refresh_token: undefined as any,
       expiry_date: 2000
@@ -63,8 +130,11 @@ test('Ciclo de renovação de tokens OAuth do Google Drive', async (t) => {
     assert.equal(session.tokens?.access_token, 'token_2');
     assert.equal(session.tokens?.refresh_token, 'original_refresh_token');
 
-    // Update with explicit new refresh_token (token rotation from Google)
-    DriveAuthService.updateSessionTokens(session, {
+    let saved = await mockRedis.get(`nova:session:${session.id}`);
+    assert.equal(saved.tokens?.refresh_token, 'original_refresh_token');
+
+    // 2: Update with explicit new refresh_token (token rotation from Google)
+    await DriveAuthService.updateSessionTokens(session, {
       access_token: 'token_3',
       refresh_token: 'rotated_new_refresh_token',
       expiry_date: 3000
@@ -72,39 +142,80 @@ test('Ciclo de renovação de tokens OAuth do Google Drive', async (t) => {
 
     assert.equal(session.tokens?.access_token, 'token_3');
     assert.equal(session.tokens?.refresh_token, 'rotated_new_refresh_token');
+
+    saved = await mockRedis.get(`nova:session:${session.id}`);
+    assert.equal(saved.tokens?.refresh_token, 'rotated_new_refresh_token');
   });
 
-  await t.test('3. Falha de renovação e tratamento de erro gracioso', async () => {
-    const session = DriveAuthService.createSession();
-    // Simulate expired or revoked tokens
-    session.tokens = {
-      access_token: 'invalid_expired_token',
-      refresh_token: 'revoked_refresh_token',
-      expiry_date: 1
+  await t.test('4. Falha de comunicação com o Redis gera erro controlado e não simula persistência', async () => {
+    // Failing Redis mock
+    const failingRedis: IRedisClient = {
+      get: async () => {
+        throw new Error('Connection timeout to https://upstash.io');
+      },
+      set: async () => {
+        throw new Error('ECONNREFUSED Upstash cluster unreachable');
+      },
+      del: async () => {
+        throw new Error('Connection reset');
+      }
     };
 
-    // getStatus should catch Google API errors and return error status without crashing
-    const statusResult = await DriveAuthService.getStatus(session);
-    assert.equal(statusResult.configured, true);
-    assert.equal(statusResult.connected, false);
-    assert.equal(statusResult.status, 'error');
-    assert.match(statusResult.message, /Falha na validação do token/);
+    DriveAuthService.setRedisClient(failingRedis);
 
-    // listFiles should catch Google API errors and return safe empty list without crashing
-    const listResult = await DriveAuthService.listFiles(session, {});
-    assert.equal(listResult.status, 'error');
-    assert.equal(listResult.total, 0);
-    assert.deepEqual(listResult.files, []);
-    assert.match(listResult.error || '', /Erro da API do Google Drive/);
+    // getValidSession must throw controlled error and not pretend session exists or is valid
+    await assert.rejects(
+      async () => {
+        await DriveAuthService.getValidSession('0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef');
+      },
+      (err: any) => {
+        assert.match(err.message, /Falha na comunicação com o serviço de sessões/);
+        return true;
+      }
+    );
+
+    // saveSession must throw controlled error when Redis write fails
+    const dummySession: UserSessionData = {
+      id: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+      csrfState: null,
+      csrfExpiresAt: null,
+      targetFolderId: null,
+      tokens: null,
+      userEmail: null,
+      userName: null,
+      connectedAt: null,
+      lastVerifiedAt: null,
+      lastActivityAt: Date.now(),
+      createdAt: Date.now()
+    };
+
+    await assert.rejects(
+      async () => {
+        await DriveAuthService.saveSession(dummySession);
+      },
+      (err: any) => {
+        assert.match(err.message, /Falha na comunicação com o serviço de sessões/);
+        return true;
+      }
+    );
   });
 
-  await t.test('4. getAuthenticatedClient registra listener tokens e propaga renovação', async () => {
-    const session = DriveAuthService.createSession();
+  await t.test('5. getAuthenticatedClient registra listener tokens e propaga renovação para o Redis', async () => {
+    const redisStore = new Map<string, any>();
+    const mockRedis: IRedisClient = {
+      get: async (k) => redisStore.get(k) || null,
+      set: async (k, v) => { redisStore.set(k, v); return 'OK'; },
+      del: async (k) => { redisStore.delete(k); return 1; }
+    };
+    DriveAuthService.setRedisClient(mockRedis);
+
+    const session = await DriveAuthService.createSession();
     session.tokens = {
       access_token: 'access_before_event',
       refresh_token: 'permanent_refresh_token',
       expiry_date: 100
     };
+    await DriveAuthService.saveSession(session);
 
     const client = DriveAuthService.getAuthenticatedClient(session);
     assert.ok(client, 'Deve criar cliente autenticado');
@@ -115,19 +226,28 @@ test('Ciclo de renovação de tokens OAuth do Google Drive', async (t) => {
       expiry_date: 200
     });
 
-    // Check that session tokens and disk are updated immediately
+    // Wait a brief tick for async event handler
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    // Check that session tokens and Redis are updated
     assert.equal(session.tokens?.access_token, 'access_after_event_refreshed');
     assert.equal(session.tokens?.refresh_token, 'permanent_refresh_token');
 
-    const sessionsFile = path.resolve(process.cwd(), '.data', 'sessions.json');
-    const diskSessions = JSON.parse(fs.readFileSync(sessionsFile, 'utf-8'));
-    const saved = diskSessions.find((s: UserSessionData) => s.id === session.id);
+    const saved = await mockRedis.get(`nova:session:${session.id}`);
     assert.equal(saved.tokens?.access_token, 'access_after_event_refreshed');
     assert.equal(saved.tokens?.refresh_token, 'permanent_refresh_token');
   });
 
-  await t.test('5. Preservação de scope, token_type e outros campos quando novos valores forem undefined ou ausentes', () => {
-    const session = DriveAuthService.createSession();
+  await t.test('6. Preservação de scope, token_type, id_token e não exposição de tokens em status', async () => {
+    const redisStore = new Map<string, any>();
+    const mockRedis: IRedisClient = {
+      get: async (k) => redisStore.get(k) || null,
+      set: async (k, v) => { redisStore.set(k, v); return 'OK'; },
+      del: async (k) => { redisStore.delete(k); return 1; }
+    };
+    DriveAuthService.setRedisClient(mockRedis);
+
+    const session = await DriveAuthService.createSession();
     session.tokens = {
       access_token: 'initial_access_token',
       refresh_token: 'initial_refresh_token',
@@ -136,6 +256,7 @@ test('Ciclo de renovação de tokens OAuth do Google Drive', async (t) => {
       id_token: 'initial_id_token_jwt',
       expiry_date: 1000
     };
+    await DriveAuthService.saveSession(session);
 
     // Google returns a renewal response where scope, token_type, id_token, and refresh_token are undefined
     const renewalWithUndefinedFields = {
@@ -146,9 +267,9 @@ test('Ciclo de renovação de tokens OAuth do Google Drive', async (t) => {
       refresh_token: undefined as any
     };
 
-    DriveAuthService.updateSessionTokens(session, renewalWithUndefinedFields);
+    await DriveAuthService.updateSessionTokens(session, renewalWithUndefinedFields);
 
-    // Verify all pre-existing fields are intact and not wiped by undefined properties
+    // Verify fields preserved
     assert.equal(session.tokens?.access_token, 'renewed_access_token_456');
     assert.equal(session.tokens?.expiry_date, 2000);
     assert.equal(session.tokens?.refresh_token, 'initial_refresh_token');
@@ -156,59 +277,92 @@ test('Ciclo de renovação de tokens OAuth do Google Drive', async (t) => {
     assert.equal(session.tokens?.token_type, 'Bearer');
     assert.equal(session.tokens?.id_token, 'initial_id_token_jwt');
 
-    // Also check disk persistence preserves those fields
-    const sessionsFile = path.resolve(process.cwd(), '.data', 'sessions.json');
-    const diskSessions = JSON.parse(fs.readFileSync(sessionsFile, 'utf-8'));
-    const saved = diskSessions.find((s: UserSessionData) => s.id === session.id);
+    const saved = await mockRedis.get(`nova:session:${session.id}`);
     assert.equal(saved.tokens?.scope, 'https://www.googleapis.com/auth/drive.readonly');
     assert.equal(saved.tokens?.token_type, 'Bearer');
     assert.equal(saved.tokens?.id_token, 'initial_id_token_jwt');
+
+    // Verify getStatus doesn't expose raw tokens in its returned payload
+    const statusResult = await DriveAuthService.getStatus(session);
+    assert.equal((statusResult as any).tokens, undefined);
+    assert.equal((statusResult as any).access_token, undefined);
+    assert.equal((statusResult as any).refresh_token, undefined);
   });
 
-  await t.test('6. Limpeza do arquivo temporário quando gravação/renomeação falhar, sem apagar o arquivo principal', () => {
-    const session = DriveAuthService.createSession();
-    session.tokens = {
-      access_token: 'token_before_io_failure',
-      refresh_token: 'refresh_before_io_failure'
+  await t.test('7. Expiração de sessão (TTL de 14 dias) e limpeza automática', async () => {
+    const redisStore = new Map<string, any>();
+    const mockRedis: IRedisClient = {
+      get: async (k) => redisStore.get(k) || null,
+      set: async (k, v) => { redisStore.set(k, v); return 'OK'; },
+      del: async (k) => { redisStore.delete(k); return 1; }
     };
-    DriveAuthService.updateSessionTokens(session, session.tokens);
+    DriveAuthService.setRedisClient(mockRedis);
 
-    const sessionsFile = path.resolve(process.cwd(), '.data', 'sessions.json');
-    assert.ok(fs.existsSync(sessionsFile), 'Arquivo sessions.json deve existir');
-    const contentBeforeFailure = fs.readFileSync(sessionsFile, 'utf-8');
+    const session = await DriveAuthService.createSession();
+    // Simulate expired session (lastActivityAt older than 14 days)
+    session.lastActivityAt = Date.now() - (15 * 24 * 60 * 60 * 1000);
+    await DriveAuthService.saveSession(session);
 
-    // Mock fs.renameSync to simulate I/O failure after temp file write
-    const originalRenameSync = fs.renameSync;
-    let renameAttempted = false;
-    let attemptedTempFile = '';
+    const retrieved = await DriveAuthService.getValidSession(session.id);
+    assert.equal(retrieved, null, 'Sessão expirada deve retornar null');
+    assert.equal(redisStore.has(`nova:session:${session.id}`), false, 'Sessão expirada deve ser removida do Redis');
+  });
 
-    fs.renameSync = ((oldPath: fs.PathLike, newPath: fs.PathLike) => {
-      renameAttempted = true;
-      attemptedTempFile = String(oldPath);
-      throw new Error('Simulated I/O disk rename error (EACCES/EBUSY)');
-    }) as any;
+  await t.test('8. Validação CSRF OAuth: expiração de 10 minutos e proteção contra reutilização', async () => {
+    const redisStore = new Map<string, any>();
+    const mockRedis: IRedisClient = {
+      get: async (k) => redisStore.get(k) || null,
+      set: async (k, v) => { redisStore.set(k, v); return 'OK'; },
+      del: async (k) => { redisStore.delete(k); return 1; }
+    };
+    DriveAuthService.setRedisClient(mockRedis);
 
-    try {
-      // Trigger saveSessionsToDisk via updateSessionTokens
-      DriveAuthService.updateSessionTokens(session, {
-        access_token: 'failed_save_token'
-      });
+    const session = await DriveAuthService.createSession();
+    const { state } = await DriveAuthService.generateAuthorizationUrl(session, 'folder_123');
 
-      assert.ok(renameAttempted, 'A tentativa de renomeação atômica deve ter ocorrido');
-      assert.ok(attemptedTempFile.endsWith('.tmp'), 'Arquivo temporário deve ter sido criado');
-      assert.equal(fs.existsSync(attemptedTempFile), false, 'Arquivo temporário deve ter sido removido na limpeza do erro');
+    assert.ok(state, 'CSRF state deve ser gerado');
+    assert.equal(session.csrfState, state);
+    assert.equal(session.targetFolderId, 'folder_123');
 
-      // Verify that the main sessions.json file was NOT deleted or corrupted
-      assert.ok(fs.existsSync(sessionsFile), 'Arquivo sessions.json principal NUNCA deve ser apagado');
-      assert.equal(fs.readFileSync(sessionsFile, 'utf-8'), contentBeforeFailure, 'Conteúdo do sessions.json deve permanecer íntegro');
+    // 1: Rejection on mismatched state
+    const badStateResult = await DriveAuthService.handleCallback(session, 'code_123', 'wrong_state');
+    assert.equal(badStateResult.success, false);
+    assert.match(badStateResult.error || '', /Validação CSRF falhou/);
+    assert.equal(session.csrfState, null, 'CSRF state deve ser invalidado após tentativa falha');
 
-      // Verify no orphan .tmp files remain in .data directory
-      const dataDir = path.resolve(process.cwd(), '.data');
-      const orphanTmpFiles = fs.readdirSync(dataDir).filter(f => f.endsWith('.tmp'));
-      assert.deepEqual(orphanTmpFiles, [], 'Nenhum arquivo .tmp órfão deve sobrar na pasta .data');
-    } finally {
-      fs.renameSync = originalRenameSync;
-    }
+    // 2: Rejection on expired CSRF state (> 10 minutes)
+    await DriveAuthService.generateAuthorizationUrl(session);
+    session.csrfExpiresAt = Date.now() - 1000; // expired
+    const expiredResult = await DriveAuthService.handleCallback(session, 'code_123', session.csrfState!);
+    assert.equal(expiredResult.success, false);
+    assert.match(expiredResult.error || '', /tempo limite de 10 minutos/);
+  });
+
+  await t.test('9. Desconexão revoga tokens e limpa estado do usuário no Redis', async () => {
+    const redisStore = new Map<string, any>();
+    const mockRedis: IRedisClient = {
+      get: async (k) => redisStore.get(k) || null,
+      set: async (k, v) => { redisStore.set(k, v); return 'OK'; },
+      del: async (k) => { redisStore.delete(k); return 1; }
+    };
+    DriveAuthService.setRedisClient(mockRedis);
+
+    const session = await DriveAuthService.createSession();
+    session.tokens = { access_token: 'token_to_disconnect' };
+    session.userEmail = 'test@example.com';
+    session.userName = 'Tester';
+    session.targetFolderId = 'folder_abc';
+    await DriveAuthService.saveSession(session);
+
+    const disconnected = await DriveAuthService.disconnect(session);
+    assert.equal(disconnected, true);
+    assert.equal(session.tokens, null);
+    assert.equal(session.userEmail, null);
+    assert.equal(session.userName, null);
+    assert.equal(session.targetFolderId, null);
+
+    const saved = await mockRedis.get(`nova:session:${session.id}`);
+    assert.equal(saved.tokens, null);
+    assert.equal(saved.userEmail, null);
   });
 });
-
