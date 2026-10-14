@@ -1,0 +1,6 @@
+{
+  "name": "NOVA STORAGE",
+  "description": "Painel privado de gerenciamento e catalogação de arquivos de vídeo e episódios com arquitetura desacoplada para provedores de armazenamento remoto.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
