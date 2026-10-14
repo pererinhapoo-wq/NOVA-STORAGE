@@ -1,5 +1,6 @@
 import express from 'express';
 import type { Request, Response } from 'express';
+import { resolveSessionSecret } from '../utils/sessionSecret.ts';
 
 export const healthRouter = express.Router();
 
@@ -8,8 +9,7 @@ const startTime = Date.now();
 healthRouter.get('/health', (_req: Request, res: Response) => {
   const uptimeSeconds = Math.floor((Date.now() - startTime) / 1000);
   const hasOAuthConfig = Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET);
-  const sessionSecret = process.env.SESSION_SECRET?.trim();
-  const hasSessionSecret = Boolean(sessionSecret && sessionSecret.length >= 32);
+  const secretStatus = resolveSessionSecret();
   const hasUpstashConfig = Boolean(process.env.KV_REST_API_URL?.trim() && process.env.KV_REST_API_TOKEN?.trim());
 
   res.status(200).json({
@@ -21,7 +21,9 @@ healthRouter.get('/health', (_req: Request, res: Response) => {
     environment: process.env.NODE_ENV || 'development',
     serverPort: process.env.PORT || '3000',
     configuration: {
-      sessionSecretConfigured: hasSessionSecret,
+      sessionSecretConfigured: secretStatus.configured,
+      sessionSecretPresent: secretStatus.present,
+      sessionSecretLength: secretStatus.length,
       upstashRedisConfigured: hasUpstashConfig,
       oauthConfigured: hasOAuthConfig
     },

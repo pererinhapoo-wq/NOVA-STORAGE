@@ -365,4 +365,75 @@ test('Ciclo de sessões e renovação de tokens com Upstash Redis', async (t) =>
     assert.equal(saved.tokens, null);
     assert.equal(saved.userEmail, null);
   });
+
+  await t.test('10. Resolução tolerante de SESSION_SECRET com resiliência a quotes, whitespace e aliases', async () => {
+    const { resolveSessionSecret, getEffectiveCookieSecret } = await import('../src/server/utils/sessionSecret.ts');
+
+    const originalSecret = process.env.SESSION_SECRET;
+    const originalAuth = process.env.AUTH_SECRET;
+    const originalApp = process.env.APP_SESSION_SECRET;
+
+    try {
+      // 1: Variable absent
+      delete process.env.SESSION_SECRET;
+      delete process.env.AUTH_SECRET;
+      delete process.env.APP_SESSION_SECRET;
+      let status = resolveSessionSecret();
+      assert.equal(status.configured, false);
+      assert.equal(status.present, false);
+      assert.equal(status.length, 0);
+
+      // In non-production, getEffectiveCookieSecret still generates a working ephemeral key
+      const devKey = getEffectiveCookieSecret(false);
+      assert.ok(devKey && devKey.length >= 32);
+
+      // In production, returns placeholder without crashing
+      const prodPlaceholder = getEffectiveCookieSecret(true);
+      assert.ok(prodPlaceholder.includes('placeholder'));
+
+      // 2: Valid key with exact 32 chars
+      process.env.SESSION_SECRET = '0123456789abcdef0123456789abcdef';
+      status = resolveSessionSecret();
+      assert.equal(status.configured, true);
+      assert.equal(status.present, true);
+      assert.equal(status.length, 32);
+      assert.equal(status.secret, '0123456789abcdef0123456789abcdef');
+
+      // 3: Secret with quotes (e.g. pasted into Vercel UI as "my-secret...")
+      process.env.SESSION_SECRET = '"0123456789abcdef0123456789abcdef"';
+      status = resolveSessionSecret();
+      assert.equal(status.configured, true);
+      assert.equal(status.length, 32);
+      assert.equal(status.secret, '0123456789abcdef0123456789abcdef');
+
+      // 4: Secret with 20 chars (valid >= 16)
+      process.env.SESSION_SECRET = 'valid-twenty-chars!!';
+      status = resolveSessionSecret();
+      assert.equal(status.configured, true);
+      assert.equal(status.length, 20);
+
+      // 5: Secret too short (< 16 chars)
+      process.env.SESSION_SECRET = 'short';
+      status = resolveSessionSecret();
+      assert.equal(status.configured, false);
+      assert.equal(status.present, true);
+      assert.equal(status.length, 5);
+
+      // 6: Alias AUTH_SECRET when SESSION_SECRET is undefined
+      delete process.env.SESSION_SECRET;
+      process.env.AUTH_SECRET = 'auth_secret_with_more_than_16_chars!';
+      status = resolveSessionSecret();
+      assert.equal(status.configured, true);
+      assert.equal(status.present, true);
+      assert.equal(status.secret, 'auth_secret_with_more_than_16_chars!');
+    } finally {
+      if (originalSecret) process.env.SESSION_SECRET = originalSecret;
+      else delete process.env.SESSION_SECRET;
+      if (originalAuth) process.env.AUTH_SECRET = originalAuth;
+      else delete process.env.AUTH_SECRET;
+      if (originalApp) process.env.APP_SESSION_SECRET = originalApp;
+      else delete process.env.APP_SESSION_SECRET;
+    }
+  });
 });
+
