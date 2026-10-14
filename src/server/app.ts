@@ -23,37 +23,61 @@ const DISALLOWED_DEFAULT_SECRETS = [
   'INFORME_AQUI_UMA_STRING_ALEATORIA_COM_NO_MINIMO_32_CARACTERES'
 ];
 
-const sessionSecretEnv = process.env.SESSION_SECRET?.trim();
-let sessionSecret: string;
+let ephemeralDevSecret: string | null = null;
 
-if (isProduction) {
-  if (!sessionSecretEnv) {
-    console.error('[ERRO CRÍTICO DE SEGURANÇA] SESSION_SECRET ausente no ambiente de produção.');
-    console.error('Defina a variável SESSION_SECRET com no mínimo 32 caracteres criptograficamente aleatórios.');
-    process.exit(1);
+function getCookieSecret(): string {
+  const secretEnv = process.env.SESSION_SECRET?.trim();
+  if (secretEnv && secretEnv.length >= MIN_SECRET_LENGTH && !DISALLOWED_DEFAULT_SECRETS.includes(secretEnv)) {
+    return secretEnv;
   }
-
-  if (sessionSecretEnv.length < MIN_SECRET_LENGTH || DISALLOWED_DEFAULT_SECRETS.includes(sessionSecretEnv)) {
-    console.error('[ERRO CRÍTICO DE SEGURANÇA] SESSION_SECRET não atende aos requisitos de entropia em produção.');
-    console.error(`O segredo deve possuir pelo menos ${MIN_SECRET_LENGTH} caracteres e não ser um valor padrão.`);
-    process.exit(1);
+  if (!isProduction) {
+    if (!ephemeralDevSecret) {
+      ephemeralDevSecret = crypto.randomBytes(32).toString('hex');
+    }
+    return ephemeralDevSecret;
   }
-
-  sessionSecret = sessionSecretEnv;
-} else {
-  // In development/test, generate an ephemeral random secret if not defined to avoid static fallbacks
-  if (!sessionSecretEnv || sessionSecretEnv.length < MIN_SECRET_LENGTH) {
-    sessionSecret = crypto.randomBytes(32).toString('hex');
-  } else {
-    sessionSecret = sessionSecretEnv;
-  }
+  // In production, fallback string for cookieParser initialization so module loading does not crash.
+  // Storage routes are protected by the middleware below with a clear HTTP 500 error instead of killing the process.
+  return 'unconfigured-production-secret-placeholder-minimum-32-chars';
 }
 
 app.use(express.json());
-app.use(cookieParser(sessionSecret));
+app.use(cookieParser(getCookieSecret()));
 
-// Mount API routes
+// Health route is always accessible and does not require session cookies or Redis
 app.use('/api', healthRouter);
+
+// Middleware for storage routes: validates production SESSION_SECRET and Upstash config with controlled HTTP response
+app.use('/api/storage', (req, res, next) => {
+  if (isProduction) {
+    const secretEnv = process.env.SESSION_SECRET?.trim();
+    if (!secretEnv || secretEnv.length < MIN_SECRET_LENGTH || DISALLOWED_DEFAULT_SECRETS.includes(secretEnv)) {
+      console.error('[NOVA STORAGE] SESSION_SECRET ausente ou com entropia insuficiente na Vercel (mínimo 32 caracteres).');
+      return res.status(500).json({
+        configured: false,
+        status: 'error',
+        code: 'CONFIG_ERROR',
+        message: 'A variável de ambiente SESSION_SECRET não está configurada ou possui menos de 32 caracteres na Vercel.',
+        checkedAt: new Date().toISOString()
+      });
+    }
+
+    const kvUrl = process.env.KV_REST_API_URL?.trim();
+    const kvToken = process.env.KV_REST_API_TOKEN?.trim();
+    if (!kvUrl || !kvToken) {
+      console.error('[NOVA STORAGE] Variáveis Upstash Redis (KV_REST_API_URL / KV_REST_API_TOKEN) ausentes em produção.');
+      return res.status(500).json({
+        configured: false,
+        status: 'error',
+        code: 'REDIS_CONFIG_ERROR',
+        message: 'Variáveis de ambiente KV_REST_API_URL e KV_REST_API_TOKEN são obrigatórias na Vercel para persistência no Upstash Redis.',
+        checkedAt: new Date().toISOString()
+      });
+    }
+  }
+  next();
+});
+
 app.use('/api/storage', driveRouter);
 
 export default app;

@@ -8,6 +8,9 @@ const startTime = Date.now();
 healthRouter.get('/health', (_req: Request, res: Response) => {
   const uptimeSeconds = Math.floor((Date.now() - startTime) / 1000);
   const hasOAuthConfig = Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET);
+  const sessionSecret = process.env.SESSION_SECRET?.trim();
+  const hasSessionSecret = Boolean(sessionSecret && sessionSecret.length >= 32);
+  const hasUpstashConfig = Boolean(process.env.KV_REST_API_URL?.trim() && process.env.KV_REST_API_TOKEN?.trim());
 
   res.status(200).json({
     status: 'ok',
@@ -17,6 +20,11 @@ healthRouter.get('/health', (_req: Request, res: Response) => {
     timestamp: new Date().toISOString(),
     environment: process.env.NODE_ENV || 'development',
     serverPort: process.env.PORT || '3000',
+    configuration: {
+      sessionSecretConfigured: hasSessionSecret,
+      upstashRedisConfigured: hasUpstashConfig,
+      oauthConfigured: hasOAuthConfig
+    },
     storage: {
       localCatalog: 'active',
       googleDrive: {
