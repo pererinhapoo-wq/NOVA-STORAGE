@@ -14,7 +14,28 @@ const isProduction = process.env.NODE_ENV === 'production';
 app.set('trust proxy', 1);
 
 app.use(express.json());
+
+// In serverless runtimes (such as Vercel), req.cookies is pre-populated without signing secrets.
+// Reset req.cookies if req.secret is absent so cookie-parser executes full cryptographic signature verification.
+app.use((req, _res, next) => {
+  if (req.cookies && !(req as any).secret) {
+    delete (req as any).cookies;
+  }
+  next();
+});
+
 app.use(cookieParser(getEffectiveCookieSecret(isProduction)));
+
+// Guarantee that req.secret and req.signedCookies are always defined on every request
+app.use((req, _res, next) => {
+  if (!(req as any).secret) {
+    (req as any).secret = getEffectiveCookieSecret(isProduction);
+  }
+  if (!req.signedCookies) {
+    req.signedCookies = Object.create(null);
+  }
+  next();
+});
 
 // Health route is always accessible and does not require session cookies or Redis
 app.use('/api', healthRouter);

@@ -435,5 +435,38 @@ test('Ciclo de sessões e renovação de tokens com Upstash Redis', async (t) =>
       else delete process.env.APP_SESSION_SECRET;
     }
   });
+
+  await t.test('11. Compatibilidade com cookies assinados na Vercel quando req.cookies vem pré-populado', async () => {
+    const http = await import('node:http');
+    const { default: app } = await import('../api/index.ts');
+
+    const server = http.createServer((req, res) => {
+      // Simulate Vercel pre-populating req.cookies
+      (req as any).cookies = { vercel_internal: 'token' };
+      app(req, res);
+    });
+
+    await new Promise<void>((resolve) => {
+      server.listen(0, async () => {
+        try {
+          const port = (server.address() as any).port;
+          const res = await fetch(`http://127.0.0.1:${port}/api/storage/drive/auth-url`);
+          assert.equal(res.status, 200);
+          const data = await res.json();
+          assert.ok(data.url);
+          assert.ok(data.state);
+
+          // Verify that Set-Cookie header contains a properly signed cookie
+          const setCookieHeader = res.headers.get('set-cookie');
+          assert.ok(setCookieHeader);
+          assert.match(setCookieHeader, /nova_session_id=s%3A/);
+        } finally {
+          server.close();
+          resolve();
+        }
+      });
+    });
+  });
 });
+
 

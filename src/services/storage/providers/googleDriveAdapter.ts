@@ -95,7 +95,7 @@ export class GoogleDriveStorageAdapter implements StorageProviderAdapter {
     }
   }
 
-  async getAuthUrl(folderId?: string): Promise<{ url: string; state: string } | null> {
+  async getAuthUrl(folderId?: string): Promise<{ url?: string; state?: string; error?: string }> {
     try {
       const url = folderId
         ? `/api/storage/drive/auth-url?folderId=${encodeURIComponent(folderId)}`
@@ -103,12 +103,15 @@ export class GoogleDriveStorageAdapter implements StorageProviderAdapter {
       const response = await fetch(url);
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.message || 'Falha ao gerar link OAuth');
+        return {
+          error: errorData.message || `Erro no servidor backend (HTTP ${response.status}).`
+        };
       }
       return await response.json();
-    } catch (err) {
-      console.error('Erro ao obter URL OAuth do Drive:', err);
-      return null;
+    } catch (err: any) {
+      return {
+        error: err?.message || 'Falha de rede ao contatar o servidor backend.'
+      };
     }
   }
 

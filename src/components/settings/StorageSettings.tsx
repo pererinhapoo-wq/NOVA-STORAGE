@@ -134,11 +134,8 @@ export const StorageSettings: React.FC<StorageSettingsProps> = ({
 
     const authData = await adapter.getAuthUrl(folderId);
     if (!authData || !authData.url) {
-      onNotify(
-        'Configuração Pendente no Servidor',
-        'Defina GOOGLE_CLIENT_ID e GOOGLE_CLIENT_SECRET no .env antes de iniciar a autorização.',
-        'info'
-      );
+      const errorMessage = authData?.error || 'Não foi possível gerar o link de autorização com o Google Drive.';
+      onNotify('Falha na Autorização', errorMessage, 'error');
       return;
     }
 
