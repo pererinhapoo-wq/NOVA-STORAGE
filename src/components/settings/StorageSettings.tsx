@@ -10,11 +10,21 @@ import {
   Shield,
   KeyRound,
   FileCode,
-  Info
+  Info,
+  Film,
+  Play,
+  Search,
+  FolderOpen,
+  X,
+  FileVideo,
+  Clock,
+  Eye,
+  AlertCircle
 } from 'lucide-react';
 import { StorageProviderConfig } from '../../types/storage';
-import { GoogleDriveStorageAdapter } from '../../services/storage/providers/googleDriveAdapter';
+import { GoogleDriveStorageAdapter, DriveVideoItem } from '../../services/storage/providers/googleDriveAdapter';
 import { MegaStorageAdapter } from '../../services/storage/providers/megaAdapter';
+import { DriveVideoPlayerModal } from './DriveVideoPlayerModal';
 
 interface StorageSettingsProps {
   providers: StorageProviderConfig[];
@@ -48,9 +58,17 @@ export const StorageSettings: React.FC<StorageSettingsProps> = ({
     redirectUri: string;
   } | null>(null);
 
+  // Google Drive Video Explorer State
+  const [isExploringDrive, setIsExploringDrive] = useState(false);
+  const [driveVideos, setDriveVideos] = useState<DriveVideoItem[]>([]);
+  const [isLoadingVideos, setIsLoadingVideos] = useState(false);
+  const [videosError, setVideosError] = useState<string | null>(null);
+  const [videoSearchQuery, setVideoSearchQuery] = useState('');
+  const [selectedDriveVideo, setSelectedDriveVideo] = useState<DriveVideoItem | null>(null);
+
   const fetchDriveStatus = React.useCallback(async () => {
     try {
-      const res = await fetch('/api/storage/drive/status');
+      const res = await fetch('/api/storage/drive/status', { credentials: 'include' });
       if (res.ok) {
         const data = await res.json();
         setDriveStatus(data);
@@ -101,7 +119,7 @@ export const StorageSettings: React.FC<StorageSettingsProps> = ({
         // 3. Do not trust the postMessage alone as proof: verify real backend connection
         popupWindowRef.current = null;
         try {
-          const res = await fetch('/api/storage/drive/status');
+          const res = await fetch('/api/storage/drive/status', { credentials: 'include' });
           if (res.ok) {
             const data = await res.json();
             setDriveStatus(data);
@@ -152,6 +170,8 @@ export const StorageSettings: React.FC<StorageSettingsProps> = ({
     const ok = await adapter.disconnect();
     if (ok) {
       onNotify('Desconectado', 'Sessão do Google Drive encerrada no servidor.', 'info');
+      setIsExploringDrive(false);
+      setDriveVideos([]);
       fetchDriveStatus();
     }
   };
@@ -222,6 +242,70 @@ export const StorageSettings: React.FC<StorageSettingsProps> = ({
     });
   };
 
+  // Google Drive Video Explorer Handlers
+  const handleLoadDriveVideos = async (silent = false) => {
+    setIsLoadingVideos(true);
+    setVideosError(null);
+
+    const prov = providers.find(p => p.id === 'google_drive');
+    const folderId = prov?.settings.targetFolderId?.trim() || '';
+
+    const adapter = new GoogleDriveStorageAdapter(prov?.settings.clientId, folderId || undefined);
+
+    try {
+      const result = await adapter.listVideos({
+        folderId: folderId || undefined
+      });
+
+      if (result.status === 'error' || result.error) {
+        setVideosError(result.error || 'Não foi possível carregar a lista de vídeos do Google Drive.');
+        if (!silent) {
+          onNotify('Erro ao Listar Vídeos', result.error || 'Falha ao consultar API do Drive.', 'error');
+        }
+      } else {
+        setDriveVideos(result.files);
+        if (!silent) {
+          onNotify(
+            'Vídeos do Google Drive',
+            `${result.files.length} arquivo(s) de vídeo encontrado(s).`,
+            'success'
+          );
+        }
+      }
+    } catch (err: any) {
+      const msg = err?.message || 'Falha de comunicação ao listar arquivos do Google Drive.';
+      setVideosError(msg);
+      if (!silent) {
+        onNotify('Erro de Conexão', msg, 'error');
+      }
+    } finally {
+      setIsLoadingVideos(false);
+    }
+  };
+
+  const handleToggleExplorer = () => {
+    if (!isExploringDrive) {
+      setIsExploringDrive(true);
+      handleLoadDriveVideos();
+    } else {
+      setIsExploringDrive(false);
+    }
+  };
+
+  // Filter videos by search query (name or format)
+  const filteredDriveVideos = driveVideos.filter((v) => {
+    if (!videoSearchQuery.trim()) return true;
+    const q = videoSearchQuery.toLowerCase();
+    const format = GoogleDriveStorageAdapter.inferFormat(v.name, v.mimeType).toLowerCase();
+    return (
+      v.name.toLowerCase().includes(q) ||
+      v.mimeType.toLowerCase().includes(q) ||
+      format.includes(q)
+    );
+  });
+
+  const activeFolderId = providers.find(p => p.id === 'google_drive')?.settings.targetFolderId?.trim();
+
   return (
     <div className="space-y-8 max-w-5xl">
       {/* Overview Banner */}
@@ -233,22 +317,9 @@ export const StorageSettings: React.FC<StorageSettingsProps> = ({
           <div>
             <h1 className="text-base font-bold text-white">Configurações de Armazenamento Remoto</h1>
             <p className="text-xs text-neutral-400">
-              Camada de serviço desacoplada para conexão futura com Google Drive, MEGA e S3
+              Camada de serviço desacoplada para conexão com Google Drive, MEGA e S3
             </p>
           </div>
-        </div>
-
-        {/* Prominent Truthful Notice */}
-        <div className="p-4 rounded-lg bg-amber-500/10 border border-amber-500/20 text-xs text-neutral-300 space-y-1.5">
-          <div className="flex items-center gap-2 font-semibold text-amber-300">
-            <AlertTriangle className="w-4 h-4 shrink-0" />
-            <span>Estado da Conexão: Não Configurada (Catálogo Local Ativo)</span>
-          </div>
-          <p className="text-neutral-400 leading-relaxed">
-            Em conformidade com a arquitetura da NOVA STORAGE, nenhum serviço externo pago ou conta de nuvem foi
-            vinculada ainda. Esta interface permite estruturar os parâmetros e credenciais técnicas que serão
-            utilizadas pelo backend proxy quando o provisionamento remoto for solicitado.
-          </p>
         </div>
 
         {/* Real Backend Server Diagnostics */}
@@ -289,7 +360,8 @@ export const StorageSettings: React.FC<StorageSettingsProps> = ({
                 <div className="flex flex-wrap items-center gap-2">
                   <h3 className="text-sm font-bold text-white">Google Drive API (v3)</h3>
                   {driveStatus?.connected ? (
-                    <span className="text-[11px] font-mono text-emerald-400 bg-emerald-950/40 px-2 py-0.5 rounded border border-emerald-800/50">
+                    <span className="text-[11px] font-mono text-emerald-400 bg-emerald-950/40 px-2 py-0.5 rounded border border-emerald-800/50 flex items-center gap-1">
+                      <CheckCircle2 className="w-3 h-3" />
                       CONECTADO
                     </span>
                   ) : driveStatus?.status === 'pending_auth' ? (
@@ -307,7 +379,7 @@ export const StorageSettings: React.FC<StorageSettingsProps> = ({
                 </p>
                 {driveStatus?.connected && driveStatus.userEmail && (
                   <p className="text-xs text-emerald-300 font-medium pt-1">
-                    Conta vinculada: <span className="font-mono text-white">{driveStatus.userEmail}</span>
+                    Conta autorizada: <span className="font-mono text-white">{driveStatus.userEmail}</span>
                   </p>
                 )}
               </div>
@@ -350,13 +422,13 @@ export const StorageSettings: React.FC<StorageSettingsProps> = ({
               </label>
               <input
                 type="text"
-                placeholder="Ex: 1A2b3C4d5E6f_G7h8I9j0K"
+                placeholder="Ex: 1A2b3C4d5E6f_G7h8I9j0K (deixe vazio para listar todos)"
                 value={providers.find(p => p.id === 'google_drive')?.settings.targetFolderId || ''}
                 onChange={(e) => handleFieldChange('google_drive', 'targetFolderId', e.target.value)}
                 className="w-full bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-2 text-xs text-neutral-200 font-mono focus:outline-none focus:border-cyan-500"
               />
               <span className="text-[10px] text-neutral-500 mt-1 block">
-                Filtra a listagem remota para uma pasta específica
+                Vazio lista todos os vídeos acessíveis; preenchido filtra pela pasta especificada
               </span>
             </div>
           </div>
@@ -370,7 +442,7 @@ export const StorageSettings: React.FC<StorageSettingsProps> = ({
               <button
                 type="button"
                 onClick={() => {
-                  const uri = driveStatus?.redirectUri || 'https://ais-dev-ybwzp7bluwrxebqiuulyzh-875945009084.us-east1.run.app/api/storage/drive/callback';
+                  const uri = driveStatus?.redirectUri || window.location.origin + '/api/storage/drive/callback';
                   navigator.clipboard.writeText(uri);
                   onNotify('URL Copiada', 'Cole em "URIs de redirecionamento autorizados" no console do Google.', 'success');
                 }}
@@ -381,7 +453,7 @@ export const StorageSettings: React.FC<StorageSettingsProps> = ({
               </button>
             </div>
             <p className="font-mono text-[11px] text-neutral-400 bg-neutral-900 p-2 rounded border border-neutral-800/80 break-all select-all">
-              {driveStatus?.redirectUri || 'https://ais-dev-ybwzp7bluwrxebqiuulyzh-875945009084.us-east1.run.app/api/storage/drive/callback'}
+              {driveStatus?.redirectUri || (window.location.origin + '/api/storage/drive/callback')}
             </p>
             <p className="text-[11px] text-neutral-500">
               Cadastre esta URI exata nas credenciais do seu projeto no Google Cloud (Tipo: Aplicativo da Web).
@@ -402,7 +474,19 @@ export const StorageSettings: React.FC<StorageSettingsProps> = ({
               )}
             </div>
 
-            <div className="flex items-center gap-2 self-start sm:self-auto">
+            <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto">
+              {/* Requirement: Exibir o botão "Explorar Vídeos do Google Drive" quando a conta estiver conectada */}
+              {driveStatus?.connected && (
+                <button
+                  type="button"
+                  onClick={handleToggleExplorer}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-neutral-950 bg-cyan-400 hover:bg-cyan-300 rounded-lg transition-colors whitespace-nowrap shadow-sm"
+                >
+                  <Film className="w-3.5 h-3.5" />
+                  <span>{isExploringDrive ? 'Fechar Explorador' : 'Explorar Vídeos do Google Drive'}</span>
+                </button>
+              )}
+
               {driveStatus?.connected ? (
                 <button
                   type="button"
@@ -432,10 +516,224 @@ export const StorageSettings: React.FC<StorageSettingsProps> = ({
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-neutral-200 hover:text-white bg-neutral-800 hover:bg-neutral-700 disabled:opacity-50 rounded-lg transition-colors whitespace-nowrap"
               >
                 <RefreshCw className={`w-3.5 h-3.5 ${testingId === 'google_drive' ? 'animate-spin' : ''}`} />
-                <span>Testar Estado da Conexão</span>
+                <span>Testar Conexão</span>
               </button>
             </div>
           </div>
+
+          {/* Interactive Google Drive Video Explorer Panel */}
+          {driveStatus?.connected && isExploringDrive && (
+            <div className="pt-4 border-t border-cyan-500/30 space-y-4">
+              {/* Explorer Header */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-neutral-950/80 p-4 rounded-xl border border-neutral-800">
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <Film className="w-4 h-4 text-cyan-400" />
+                    <h4 className="text-sm font-bold text-white">Explorador de Vídeos do Google Drive</h4>
+                    <span className="text-[11px] font-mono text-cyan-300 bg-cyan-950/60 px-2 py-0.5 rounded border border-cyan-800/50">
+                      {filteredDriveVideos.length} vídeo(s)
+                    </span>
+                  </div>
+                  <div className="text-xs text-neutral-400">
+                    {activeFolderId ? (
+                      <span className="text-cyan-400 font-mono flex items-center gap-1">
+                        <FolderOpen className="w-3 h-3 text-cyan-400" />
+                        Filtro ativo por pasta: <strong className="text-white">{activeFolderId}</strong>
+                      </span>
+                    ) : (
+                      <span className="text-neutral-400 flex items-center gap-1">
+                        <HardDrive className="w-3 h-3 text-neutral-500" />
+                        Listando todos os vídeos acessíveis (ID de pasta vazio)
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {/* Explorer Controls: Search & Refresh */}
+                <div className="flex items-center gap-2">
+                  <div className="relative flex-1 sm:w-64">
+                    <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-neutral-500" />
+                    <input
+                      type="text"
+                      placeholder="Pesquisar por nome ou formato..."
+                      value={videoSearchQuery}
+                      onChange={(e) => setVideoSearchQuery(e.target.value)}
+                      className="w-full bg-neutral-900 border border-neutral-800 rounded-lg pl-8 pr-3 py-1.5 text-xs text-neutral-200 placeholder:text-neutral-600 focus:outline-none focus:border-cyan-500"
+                    />
+                    {videoSearchQuery && (
+                      <button
+                        onClick={() => setVideoSearchQuery('')}
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-neutral-500 hover:text-neutral-300"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    )}
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => handleLoadDriveVideos()}
+                    disabled={isLoadingVideos}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-neutral-200 bg-neutral-800 hover:bg-neutral-700 disabled:opacity-50 rounded-lg transition-colors shrink-0"
+                    title="Recarregar lista de arquivos"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isLoadingVideos ? 'animate-spin' : ''}`} />
+                    <span className="hidden sm:inline">Atualizar</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Error Banner */}
+              {videosError && (
+                <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/20 text-xs text-rose-300 space-y-2">
+                  <div className="flex items-center gap-2 font-semibold">
+                    <AlertCircle className="w-4 h-4 shrink-0" />
+                    <span>Falha ao consultar vídeos no Google Drive</span>
+                  </div>
+                  <p className="text-neutral-400 leading-relaxed text-[11px]">
+                    {videosError}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => handleLoadDriveVideos()}
+                    className="inline-flex items-center gap-1.5 px-3 py-1 text-xs font-semibold text-rose-300 bg-rose-950/60 border border-rose-800/60 rounded-md hover:bg-rose-900/60 transition-colors"
+                  >
+                    <RefreshCw className="w-3 h-3" />
+                    <span>Tentar Novamente</span>
+                  </button>
+                </div>
+              )}
+
+              {/* Loading State */}
+              {isLoadingVideos && (
+                <div className="p-10 flex flex-col items-center justify-center gap-3 bg-neutral-950/40 rounded-xl border border-neutral-800">
+                  <RefreshCw className="w-7 h-7 text-cyan-400 animate-spin" />
+                  <p className="text-xs font-mono text-neutral-400">
+                    Consultando arquivos de vídeo disponíveis no Google Drive...
+                  </p>
+                </div>
+              )}
+
+              {/* Empty List State */}
+              {!isLoadingVideos && !videosError && filteredDriveVideos.length === 0 && (
+                <div className="p-8 text-center bg-neutral-950/40 rounded-xl border border-neutral-800 space-y-2">
+                  <FileVideo className="w-8 h-8 text-neutral-600 mx-auto" />
+                  <h5 className="text-xs font-semibold text-neutral-300">
+                    {videoSearchQuery ? 'Nenhum vídeo compatível com a pesquisa' : 'Nenhum arquivo de vídeo encontrado'}
+                  </h5>
+                  <p className="text-[11px] text-neutral-500 max-w-md mx-auto">
+                    {videoSearchQuery
+                      ? `Nenhum arquivo corresponde ao termo "${videoSearchQuery}". Limpe o filtro para ver todos os vídeos.`
+                      : activeFolderId
+                      ? `Não foram encontrados arquivos de vídeo (.mp4, .mkv, .webm, .avi) na pasta informada (${activeFolderId}). Certifique-se de que o ID da pasta está correto.`
+                      : 'Nenhum arquivo de vídeo localizado na raiz ou compartilhado na sua conta do Google Drive.'}
+                  </p>
+                </div>
+              )}
+
+              {/* Video List Table */}
+              {!isLoadingVideos && filteredDriveVideos.length > 0 && (
+                <div className="rounded-xl border border-neutral-800 overflow-hidden bg-neutral-950/50">
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs text-neutral-300">
+                      <thead className="bg-neutral-900/80 border-b border-neutral-800 text-[11px] uppercase font-bold text-neutral-400 tracking-wider">
+                        <tr>
+                          <th className="py-2.5 px-3">Nome do Arquivo</th>
+                          <th className="py-2.5 px-3 w-24">Formato</th>
+                          <th className="py-2.5 px-3 w-28">Tamanho</th>
+                          <th className="py-2.5 px-3 w-36">Modificado</th>
+                          <th className="py-2.5 px-3 w-48 text-right">Ações</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-neutral-800/60 font-sans">
+                        {filteredDriveVideos.map((video) => {
+                          const format = GoogleDriveStorageAdapter.inferFormat(video.name, video.mimeType);
+                          const isNativePlayable = format === 'MP4' || format === 'WEBM';
+
+                          return (
+                            <tr key={video.id} className="hover:bg-neutral-900/50 transition-colors">
+                              <td className="py-3 px-3">
+                                <div className="flex items-center gap-2.5 min-w-0">
+                                  <div className="w-7 h-7 rounded bg-neutral-900 border border-neutral-800 flex items-center justify-center text-cyan-400 shrink-0">
+                                    <Film className="w-3.5 h-3.5" />
+                                  </div>
+                                  <div className="min-w-0">
+                                    <span className="font-medium text-neutral-100 truncate block max-w-xs sm:max-w-md" title={video.name}>
+                                      {video.name}
+                                    </span>
+                                    {video.videoDetails?.width && video.videoDetails?.height && (
+                                      <span className="text-[10px] font-mono text-neutral-500">
+                                        {video.videoDetails.width}×{video.videoDetails.height} px
+                                      </span>
+                                    )}
+                                  </div>
+                                </div>
+                              </td>
+
+                              <td className="py-3 px-3">
+                                <span className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded border ${
+                                  isNativePlayable
+                                    ? 'bg-emerald-950/40 text-emerald-400 border-emerald-800/60'
+                                    : 'bg-amber-950/40 text-amber-400 border-amber-800/60'
+                                }`}>
+                                  {format}
+                                </span>
+                              </td>
+
+                              <td className="py-3 px-3 font-mono text-neutral-300 tabular-nums">
+                                {GoogleDriveStorageAdapter.formatBytes(video.sizeBytes)}
+                              </td>
+
+                              <td className="py-3 px-3 text-neutral-400 text-[11px] whitespace-nowrap">
+                                {GoogleDriveStorageAdapter.formatDate(video.modifiedTime || video.createdTime)}
+                              </td>
+
+                              <td className="py-3 px-3 text-right">
+                                <div className="flex items-center justify-end gap-1.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => setSelectedDriveVideo(video)}
+                                    className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-neutral-950 bg-cyan-400 hover:bg-cyan-300 rounded-lg transition-colors whitespace-nowrap shadow-sm"
+                                    title="Assistir no player de teste"
+                                  >
+                                    <Play className="w-3 h-3 fill-current" />
+                                    <span>Testar Player</span>
+                                  </button>
+
+                                  <a
+                                    href={video.webViewLink}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="inline-flex items-center gap-1 px-2 py-1.5 text-xs font-medium text-neutral-300 hover:text-white bg-neutral-800 hover:bg-neutral-700 rounded-lg transition-colors whitespace-nowrap"
+                                    title="Abrir no Google Drive (nova aba)"
+                                  >
+                                    <ExternalLink className="w-3 h-3" />
+                                  </a>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* Informative Security & Compatibility Footer */}
+              <div className="p-3.5 rounded-lg bg-neutral-950/60 border border-neutral-800 text-[11px] text-neutral-400 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <Shield className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                  <span>
+                    Visualização direta via Google Drive. Sem proxy de vídeo pesado no servidor da Vercel.
+                  </span>
+                </div>
+                <span className="text-neutral-500 font-mono text-[10px]">
+                  Zero tokens ou credenciais confidenciais expostos na interface.
+                </span>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* 2. MEGA Card */}
@@ -553,6 +851,13 @@ export const StorageSettings: React.FC<StorageSettingsProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Video Player Modal */}
+      <DriveVideoPlayerModal
+        video={selectedDriveVideo}
+        isOpen={Boolean(selectedDriveVideo)}
+        onClose={() => setSelectedDriveVideo(null)}
+      />
     </div>
   );
 };
