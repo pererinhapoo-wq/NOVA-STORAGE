@@ -31,18 +31,9 @@ export class GoogleDriveStorageAdapter implements StorageProviderAdapter {
     return 'pending_credentials';
   }
 
-  async testConnection(config: Record<string, string>): Promise<ProviderConnectionTestResult> {
-    const clientId = config.clientId?.trim();
-    const folderId = config.targetFolderId?.trim();
-
-    if (!clientId || !folderId) {
-      return {
-        success: false,
-        code: 'NOT_CONFIGURED',
-        message: 'Credenciais ausentes. Forneça o Client ID do Google Cloud e o ID da pasta de vídeos para iniciar.',
-        checkedAt: new Date().toISOString()
-      };
-    }
+  async testConnection(config?: Record<string, string>): Promise<ProviderConnectionTestResult> {
+    const clientId = config?.clientId?.trim() || this.configuredClientId || undefined;
+    const folderId = config?.targetFolderId?.trim() || this.configuredFolderId || undefined;
 
     try {
       const response = await fetch('/api/storage/drive/test-connection', {
@@ -51,7 +42,10 @@ export class GoogleDriveStorageAdapter implements StorageProviderAdapter {
           'Content-Type': 'application/json',
           'Accept': 'application/json'
         },
-        body: JSON.stringify({ clientId, targetFolderId: folderId })
+        body: JSON.stringify({
+          clientId,
+          targetFolderId: folderId
+        })
       });
 
       if (!response.ok) {
