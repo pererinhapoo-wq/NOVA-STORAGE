@@ -31,6 +31,7 @@ import { GoogleDriveStorageAdapter, DriveVideoItem } from '../../services/storag
 import { MegaStorageAdapter } from '../../services/storage/providers/megaAdapter';
 import { DriveVideoPlayerModal } from './DriveVideoPlayerModal';
 import { MuxVideoTester } from './MuxVideoTester';
+import { ExternalMediaTester } from './ExternalMediaTester';
 
 interface StorageSettingsProps {
   providers: StorageProviderConfig[];
@@ -1352,6 +1353,14 @@ export const StorageSettings: React.FC<StorageSettingsProps> = ({
           Testador de Vídeos Mux
         </h2>
         <MuxVideoTester onNotify={onNotify} />
+      </div>
+
+      {/* Analisador e Testador de Fontes Externas */}
+      <div className="space-y-3">
+        <h2 className="text-sm font-bold tracking-wide uppercase text-neutral-400 px-1">
+          Fontes Externas de Vídeo (HLS / MP4)
+        </h2>
+        <ExternalMediaTester onNotify={onNotify} />
       </div>
 
       {/* Security Architecture Principles Card */}

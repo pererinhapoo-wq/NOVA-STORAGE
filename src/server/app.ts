@@ -3,6 +3,7 @@ import dotenv from 'dotenv';
 import cookieParser from 'cookie-parser';
 import { healthRouter } from './routes/health.ts';
 import { driveRouter } from './routes/drive.ts';
+import { mediaInspectRouter } from './routes/mediaInspect.ts';
 import { getEffectiveCookieSecret, resolveSessionSecret } from './utils/sessionSecret.ts';
 
 dotenv.config();
@@ -39,6 +40,9 @@ app.use((req, _res, next) => {
 
 // Health route is always accessible and does not require session cookies or Redis
 app.use('/api', healthRouter);
+
+// Media inspection route with SSRF protection (does not require Drive OAuth credentials)
+app.use('/api/storage', mediaInspectRouter);
 
 // Middleware for storage routes: validates production SESSION_SECRET and Upstash config with controlled HTTP response
 app.use('/api/storage', (req, res, next) => {
