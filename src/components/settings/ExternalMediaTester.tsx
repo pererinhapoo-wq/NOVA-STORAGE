@@ -93,15 +93,32 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
       const response = await ExternalMediaService.inspectPage(trimmed);
       if (response.success && response.result) {
         setInspectionResult(response.result);
-        if (response.result.sourcesFound.length > 0) {
+        const diag = response.result.diagnostics;
+        if (diag.status === 'direct_source_accessible' || response.result.sourcesFound.length > 0) {
           if (onNotify) {
             onNotify(
-              'Análise Concluída',
-              `${response.result.sourcesFound.length} fonte(s) de mídia identificada(s) na página.`,
+              'Fonte Direta Identificada',
+              `${response.result.sourcesFound.length} fonte(s) direta(s) de mídia identificada(s) na página.`,
               'success'
             );
           }
-        } else if (response.result.diagnostics.detectedDrm) {
+        } else if (diag.status === 'embedded_player_detected') {
+          if (onNotify) {
+            onNotify(
+              'Player Incorporado (iframe)',
+              `Identificado(s) ${response.result.detectedIframes?.length || 0} iframe(s). Não equivale a fonte direta de vídeo.`,
+              'info'
+            );
+          }
+        } else if (diag.status === 'dynamic_loading_detected') {
+          if (onNotify) {
+            onNotify(
+              'Carregamento Dinâmico',
+              'A página referencia scripts de reprodução ou configurações dinâmicas de mídia.',
+              'info'
+            );
+          }
+        } else if (diag.detectedDrm) {
           if (onNotify) {
             onNotify(
               'Proteção DRM Detectada',
@@ -111,7 +128,7 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
           }
         } else {
           if (onNotify) {
-            onNotify('Nenhuma Fonte Aberta', 'Não foram encontradas tags de vídeo ou streams abertos na página.', 'info');
+            onNotify('Nenhuma Fonte Aberta', 'Não foram encontradas tags de vídeo, iframes ou scripts dinâmicos.', 'info');
           }
         }
       } else {
@@ -425,34 +442,107 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
         </div>
       </div>
 
-      {/* Painel com os 3 Estágios de Confirmação */}
+      {/* Painel com Diagnóstico e Estágios de Confirmação */}
       {inspectionResult && (
         <div className="space-y-4 pt-1">
+          {/* Banner de Diagnóstico Principal - 5 Estados Claros */}
+          <div
+            className={`p-3.5 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+              playbackState === 'playing'
+                ? 'bg-emerald-950/30 border-emerald-500/50 text-emerald-300'
+                : inspectionResult.diagnostics.status === 'direct_source_accessible'
+                ? 'bg-emerald-950/20 border-emerald-800/50 text-emerald-300'
+                : inspectionResult.diagnostics.status === 'embedded_player_detected'
+                ? 'bg-indigo-950/25 border-indigo-800/50 text-indigo-300'
+                : inspectionResult.diagnostics.status === 'dynamic_loading_detected'
+                ? 'bg-amber-950/25 border-amber-800/50 text-amber-300'
+                : inspectionResult.diagnostics.status === 'drm_or_protected'
+                ? 'bg-rose-950/25 border-rose-800/50 text-rose-300'
+                : 'bg-neutral-950/70 border-neutral-800 text-neutral-300'
+            }`}
+          >
+            <div className="flex items-start gap-2.5">
+              <div className="mt-0.5 shrink-0">
+                {playbackState === 'playing' ? (
+                  <Play className="w-5 h-5 text-emerald-400 fill-current" />
+                ) : inspectionResult.diagnostics.status === 'direct_source_accessible' ? (
+                  <CheckCircle2 className="w-5 h-5 text-emerald-400" />
+                ) : inspectionResult.diagnostics.status === 'embedded_player_detected' ? (
+                  <Layers className="w-5 h-5 text-indigo-400" />
+                ) : inspectionResult.diagnostics.status === 'dynamic_loading_detected' ? (
+                  <Radio className="w-5 h-5 text-amber-400 animate-pulse" />
+                ) : inspectionResult.diagnostics.status === 'drm_or_protected' ? (
+                  <AlertCircle className="w-5 h-5 text-rose-400" />
+                ) : (
+                  <AlertCircle className="w-5 h-5 text-neutral-400" />
+                )}
+              </div>
+              <div className="space-y-0.5">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs font-bold uppercase tracking-wider text-white">
+                    {playbackState === 'playing'
+                      ? '5. Reprodução Confirmada no Navegador'
+                      : inspectionResult.diagnostics.status === 'direct_source_accessible'
+                      ? '4. Fonte Direta Encontrada e Acessível'
+                      : inspectionResult.diagnostics.status === 'embedded_player_detected'
+                      ? '2. Player Incorporado (iframe) Identificado'
+                      : inspectionResult.diagnostics.status === 'dynamic_loading_detected'
+                      ? '3. Possível Carregamento Dinâmico de Mídia'
+                      : inspectionResult.diagnostics.status === 'drm_or_protected'
+                      ? 'Conteúdo com Proteção DRM Proprietária'
+                      : '1. Nenhuma Fonte Aberta Encontrada'}
+                  </span>
+                  <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-neutral-900 border border-neutral-700/60 text-neutral-300">
+                    {inspectionResult.pageTitle || 'Página Web'}
+                  </span>
+                </div>
+                <p className="text-xs leading-relaxed opacity-90">
+                  {inspectionResult.diagnostics.summaryMessage}
+                </p>
+              </div>
+            </div>
+            <div className="shrink-0 text-right sm:self-center font-mono text-[10px] text-neutral-400">
+              {inspectionResult.diagnostics.fetchTimeMs}ms · {(inspectionResult.diagnostics.responseSizeBytes / 1024).toFixed(1)} KB
+            </div>
+          </div>
+
           {/* Barra de Estágios: Fonte Encontrada -> Fonte Acessível -> Reprodução Confirmada */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-            {/* Estágio 1: Fonte Encontrada */}
+            {/* Estágio 1: Identificação de Fonte / Elemento */}
             <div
               className={`p-3 rounded-lg border flex items-start gap-2.5 ${
                 inspectionResult.sourcesFound.length > 0
                   ? 'bg-emerald-950/20 border-emerald-800/50'
+                  : (inspectionResult.detectedIframes?.length || 0) > 0
+                  ? 'bg-indigo-950/20 border-indigo-800/40'
+                  : (inspectionResult.dynamicMediaIndicators?.length || 0) > 0
+                  ? 'bg-amber-950/20 border-amber-800/40'
                   : 'bg-neutral-950/60 border-neutral-800'
               }`}
             >
               <div className="mt-0.5">
                 {inspectionResult.sourcesFound.length > 0 ? (
                   <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                ) : (inspectionResult.detectedIframes?.length || 0) > 0 ? (
+                  <Layers className="w-4 h-4 text-indigo-400" />
+                ) : (inspectionResult.dynamicMediaIndicators?.length || 0) > 0 ? (
+                  <Radio className="w-4 h-4 text-amber-400" />
                 ) : (
                   <AlertCircle className="w-4 h-4 text-neutral-500" />
                 )}
               </div>
               <div className="min-w-0">
                 <span className="text-[11px] font-bold uppercase tracking-wider block text-neutral-200">
-                  1. Fonte Encontrada
+                  1. Detecção no HTML
                 </span>
                 <span className="text-xs text-neutral-400 block truncate">
                   {inspectionResult.sourcesFound.length > 0
-                    ? `${inspectionResult.sourcesFound.length} mídia(s) identificada(s)`
-                    : 'Nenhuma tag de vídeo detectada'}
+                    ? `${inspectionResult.sourcesFound.length} fonte(s) direta(s) aberta(s)`
+                    : (inspectionResult.detectedIframes?.length || 0) > 0
+                    ? `${inspectionResult.detectedIframes?.length} iframe(s) incorporado(s)`
+                    : (inspectionResult.dynamicMediaIndicators?.length || 0) > 0
+                    ? `${inspectionResult.dynamicMediaIndicators?.length} script(s) de player dinâmico`
+                    : 'Nenhum elemento de vídeo'}
                 </span>
               </div>
             </div>
@@ -470,7 +560,15 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
               let title = '2. Fonte Acessível';
               let subtitle = 'Aguardando verificação';
 
-              if (!isChecked) {
+              if (inspectionResult.sourcesFound.length === 0) {
+                cardBg = 'bg-neutral-950/40 border-neutral-800/60';
+                icon = <AlertCircle className="w-4 h-4 text-neutral-600" />;
+                subtitle = (inspectionResult.detectedIframes?.length || 0) > 0
+                  ? 'Iframe isolado (não acessado por segurança)'
+                  : (inspectionResult.dynamicMediaIndicators?.length || 0) > 0
+                  ? 'Stream solicitado em tempo de execução'
+                  : 'Sem fonte direta para testar';
+              } else if (!isChecked) {
                 cardBg = 'bg-neutral-950/60 border-neutral-800';
                 icon = <AlertCircle className="w-4 h-4 text-neutral-500" />;
                 subtitle = 'Aguardando verificação de rede';
@@ -545,11 +643,126 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
                     ? 'Bufferizando Fragmentos...'
                     : playbackState === 'error'
                     ? 'Falha na Reprodução'
+                    : inspectionResult.sourcesFound.length === 0
+                    ? 'Nenhuma mídia direta para reproduzir'
                     : 'Aguardando Início do Player'}
                 </span>
               </div>
             </div>
           </div>
+
+          {/* Card Detalhado de Players Incorporados (iframes) */}
+          {inspectionResult.detectedIframes && inspectionResult.detectedIframes.length > 0 && (
+            <div className="p-4 rounded-xl bg-indigo-950/20 border border-indigo-800/40 space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <div className="w-7 h-7 rounded-lg bg-indigo-950 border border-indigo-800/60 flex items-center justify-center text-indigo-400 shrink-0">
+                    <Layers className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h4 className="text-xs font-bold text-indigo-200 uppercase tracking-wide">
+                      Player Incorporado (iframe) Identificado ({inspectionResult.detectedIframes.length})
+                    </h4>
+                    <span className="text-[11px] text-neutral-400">
+                      Elemento(s) &lt;iframe&gt; detectado(s) no HTML da página
+                    </span>
+                  </div>
+                </div>
+                <span className="text-[10px] font-mono font-medium px-2 py-0.5 rounded bg-indigo-950 border border-indigo-800/60 text-indigo-300 self-start sm:self-auto">
+                  FRAME ISOLADO · NÃO AFIRMA VÍDEO
+                </span>
+              </div>
+
+              <div className="p-2.5 rounded-lg bg-neutral-950/60 border border-neutral-800/70 text-xs text-neutral-300 space-y-1 leading-relaxed">
+                <p>
+                  <strong>Diretriz de Conformidade & Segurança:</strong> A presença de um elemento <code className="text-indigo-300 font-mono">&lt;iframe&gt;</code> indica que a página utiliza um frame encapsulado de terceiro. <strong>Não é possível afirmar que existe um vídeo ativo apenas por ter sido encontrado um iframe.</strong>
+                </p>
+                <p className="text-[11px] text-neutral-400">
+                  Por razões de segurança, proteção contra SSRF e a política de mesma origem (Same-Origin Policy), o NOVA STORAGE não tenta acessar o conteúdo interno de iframes de outros domínios, nem contornar restrições de acesso.
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <span className="text-[11px] font-semibold text-neutral-300 block">
+                  Domínio(s) de Origem Registrado(s):
+                </span>
+                <div className="divide-y divide-neutral-800/60 rounded-lg border border-neutral-800/80 bg-neutral-950/80 overflow-hidden">
+                  {inspectionResult.detectedIframes.map((iframe, idx) => (
+                    <div key={`${iframe.url}-${idx}`} className="p-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-mono font-semibold text-cyan-300 bg-cyan-950/40 px-2 py-0.5 rounded text-[11px] border border-cyan-800/40">
+                            {iframe.domain}
+                          </span>
+                          <span
+                            className={`text-[10px] font-mono px-1.5 py-0.2 rounded border ${
+                              iframe.isCrossOrigin
+                                ? 'text-amber-400 bg-amber-950/30 border-amber-800/30'
+                                : 'text-emerald-400 bg-emerald-950/30 border-emerald-800/30'
+                            }`}
+                          >
+                            {iframe.isCrossOrigin ? 'Cross-Origin (Terceiro)' : 'Same-Origin'}
+                          </span>
+                          {iframe.title && (
+                            <span className="text-[11px] text-neutral-400 italic truncate max-w-xs" title={iframe.title}>
+                              "{iframe.title}"
+                            </span>
+                          )}
+                        </div>
+                        <p className="font-mono text-[10px] text-neutral-500 truncate mt-1" title={iframe.url}>
+                          Destino: {iframe.url}
+                        </p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Card Detalhado de Carregamento Dinâmico de Mídia */}
+          {inspectionResult.dynamicMediaIndicators && inspectionResult.dynamicMediaIndicators.length > 0 && (
+            <div className="p-4 rounded-xl bg-amber-950/20 border border-amber-800/40 space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <div className="w-7 h-7 rounded-lg bg-amber-950 border border-amber-800/60 flex items-center justify-center text-amber-400 shrink-0">
+                    <Radio className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h4 className="text-xs font-bold text-amber-200 uppercase tracking-wide">
+                      Possível Carregamento Dinâmico de Mídia
+                    </h4>
+                    <span className="text-[11px] text-neutral-400">
+                      Scripts de reprodução ou configurações dinâmicas detectados sem execução de JS arbitrário
+                    </span>
+                  </div>
+                </div>
+                <span className="text-[10px] font-mono font-medium px-2 py-0.5 rounded bg-amber-950 border border-amber-800/60 text-amber-300 self-start sm:self-auto">
+                  CARREGAMENTO VIA SCRIPT
+                </span>
+              </div>
+
+              <div className="p-2.5 rounded-lg bg-neutral-950/60 border border-neutral-800/70 text-xs text-neutral-300 space-y-1 leading-relaxed">
+                <p>
+                  <strong>Por que a URL da página não muda e não há links abertos?</strong> O site analisado utiliza bibliotecas de player ou scripts assíncronos. Quando o episódio começa a tocar, os fragmentos de vídeo são requisitados em segundo plano via JavaScript no navegador do usuário, sem alterar a URL da barra de endereços e sem expor URLs estáticas de mídia no HTML inicial.
+                </p>
+              </div>
+
+              <div className="space-y-1.5">
+                <span className="text-[11px] font-semibold text-neutral-300 block">
+                  Evidências Identificadas no Código Fonte:
+                </span>
+                <ul className="space-y-1 text-xs">
+                  {inspectionResult.dynamicMediaIndicators.map((ind, idx) => (
+                    <li key={idx} className="flex items-start gap-2 bg-neutral-950/70 p-2 rounded-lg border border-neutral-800/60 font-mono text-[11px]">
+                      <span className="text-amber-400 font-semibold shrink-0">[{ind.patternMatched}]</span>
+                      <span className="text-neutral-300 font-sans">{ind.description}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+          )}
 
           {/* Seletor de Fontes se mais de uma for encontrada */}
           {inspectionResult.sourcesFound.length > 1 && (
@@ -672,15 +885,27 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
             </div>
           )}
 
-          {/* Mensagem de Alerta se nenhuma fonte for encontrada ou se for DRM */}
+          {/* Mensagem de Alerta se nenhuma fonte direta for encontrada */}
           {inspectionResult.sourcesFound.length === 0 && (
-            <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/30 text-xs text-amber-300 space-y-2">
-              <div className="flex items-center gap-2 font-semibold text-amber-200">
-                <AlertCircle className="w-4 h-4 shrink-0 text-amber-400" />
+            <div
+              className={`p-4 rounded-xl border text-xs space-y-2 ${
+                inspectionResult.diagnostics.status === 'embedded_player_detected'
+                  ? 'bg-indigo-950/20 border-indigo-800/40 text-indigo-300'
+                  : inspectionResult.diagnostics.status === 'dynamic_loading_detected'
+                  ? 'bg-amber-950/20 border-amber-800/40 text-amber-300'
+                  : 'bg-neutral-900/70 border-neutral-800 text-neutral-300'
+              }`}
+            >
+              <div className="flex items-center gap-2 font-semibold">
+                <AlertCircle className="w-4 h-4 shrink-0 text-cyan-400" />
                 <span>{inspectionResult.diagnostics.summaryMessage}</span>
               </div>
-              <p className="text-neutral-300 text-[11px] leading-relaxed">
-                Páginas que utilizam players ofuscados por JavaScript, DRM fechado ou iframes de terceiros não disponibilizam links abertos de mídia. O NOVA STORAGE respeita mecanismos de segurança e não realiza extrações ilegais ou contornos de proteção.
+              <p className="text-neutral-400 text-[11px] leading-relaxed">
+                {inspectionResult.diagnostics.status === 'embedded_player_detected'
+                  ? 'O conteúdo desta página depende de um iframe isolado de outro domínio. O NOVA STORAGE respeita os limites de segurança da web e não executa scraping forçado nem acessa conteúdo protegido de terceiros.'
+                  : inspectionResult.diagnostics.status === 'dynamic_loading_detected'
+                  ? 'O streaming de vídeo desta página é orquestrado sob demanda via JavaScript dinâmico no navegador. Fontes diretas estáticas (.m3u8/.mp4) não foram expostas no HTML inicial.'
+                  : 'O HTML inicial da página não expõe tags de vídeo abertas, iframes incorporados nem scripts de carregamento de mídia reconhecidos.'}
               </p>
             </div>
           )}

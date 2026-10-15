@@ -20,18 +20,46 @@ export interface ExtractedMediaSource {
   notes?: string;
 }
 
+export interface DetectedIframe {
+  url: string;
+  domain: string;
+  origin: string;
+  isCrossOrigin: boolean;
+  title?: string;
+}
+
+export interface DynamicMediaIndicator {
+  type: 'player_library' | 'player_initialization' | 'media_config' | 'data_attribute';
+  description: string;
+  patternMatched: string;
+}
+
+export type InspectionStatus =
+  | 'direct_source_accessible'
+  | 'embedded_player_detected'
+  | 'dynamic_loading_detected'
+  | 'no_sources'
+  | 'drm_or_protected'
+  | 'sources_found'
+  | 'error';
+
 export interface PageInspectionResult {
   pageUrl: string;
   pageTitle: string;
   sourcesFound: ExtractedMediaSource[];
+  detectedIframes: DetectedIframe[];
+  dynamicMediaIndicators: DynamicMediaIndicator[];
   diagnostics: {
     fetchTimeMs: number;
     responseSizeBytes: number;
     redirectCount: number;
     detectedDrm: boolean;
     detectedProtectionOrCaptcha: boolean;
-    status: 'sources_found' | 'no_sources' | 'drm_or_protected' | 'error';
+    detectedIframesCount: number;
+    detectedDynamicLoading: boolean;
+    status: InspectionStatus;
     summaryMessage: string;
+    diagnosticDetails?: string[];
   };
 }
 

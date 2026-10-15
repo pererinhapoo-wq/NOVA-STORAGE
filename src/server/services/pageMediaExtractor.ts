@@ -22,18 +22,46 @@ export interface ExtractedMediaSource {
   notes?: string;
 }
 
+export interface DetectedIframe {
+  url: string;
+  domain: string;
+  origin: string;
+  isCrossOrigin: boolean;
+  title?: string;
+}
+
+export interface DynamicMediaIndicator {
+  type: 'player_library' | 'player_initialization' | 'media_config' | 'data_attribute';
+  description: string;
+  patternMatched: string;
+}
+
+export type InspectionStatus =
+  | 'direct_source_accessible'
+  | 'embedded_player_detected'
+  | 'dynamic_loading_detected'
+  | 'no_sources'
+  | 'drm_or_protected'
+  | 'sources_found'
+  | 'error';
+
 export interface PageInspectionResult {
   pageUrl: string;
   pageTitle: string;
   sourcesFound: ExtractedMediaSource[];
+  detectedIframes: DetectedIframe[];
+  dynamicMediaIndicators: DynamicMediaIndicator[];
   diagnostics: {
     fetchTimeMs: number;
     responseSizeBytes: number;
     redirectCount: number;
     detectedDrm: boolean;
     detectedProtectionOrCaptcha: boolean;
-    status: 'sources_found' | 'no_sources' | 'drm_or_protected' | 'error';
+    detectedIframesCount: number;
+    detectedDynamicLoading: boolean;
+    status: InspectionStatus;
     summaryMessage: string;
+    diagnosticDetails?: string[];
   };
 }
 
@@ -43,7 +71,7 @@ export interface PageInspectionResult {
 function resolveUrlSafe(src: string, baseUrl: string): string | null {
   try {
     const trimmed = (src || '').trim();
-    if (!trimmed || trimmed.startsWith('javascript:') || trimmed.startsWith('data:')) {
+    if (!trimmed || trimmed.startsWith('javascript:') || trimmed.startsWith('data:') || trimmed.startsWith('about:')) {
       return null;
     }
     const resolved = new URL(trimmed, baseUrl);
@@ -94,13 +122,102 @@ function extractTitle(html: string): string {
 }
 
 /**
- * Analisa o HTML de uma página web e extrai fontes de vídeo abertas e autorizadas
+ * Determina o status da inspeção diferenciando claramente os 5 cenários:
+ * 1. Nenhuma fonte aberta encontrada
+ * 2. Player incorporado (iframe) identificado
+ * 3. Possível carregamento dinâmico de mídia
+ * 4. Fonte direta encontrada e acessível
+ * 5. (Reprodução confirmada ocorre no player no cliente)
+ */
+export function determineInspectionStatus(params: {
+  sourcesCount: number;
+  hasAccessibleDirectSource: boolean;
+  detectedDrm: boolean;
+  detectedProtection: boolean;
+  iframesCount: number;
+  dynamicIndicatorsCount: number;
+  firstIframeDomain?: string;
+}): {
+  status: InspectionStatus;
+  summaryMessage: string;
+  diagnosticDetails: string[];
+} {
+  const details: string[] = [];
+
+  if (params.detectedDrm) {
+    return {
+      status: 'drm_or_protected',
+      summaryMessage: 'Proteção DRM proprietária detectada (ex: Widevine/FairPlay). O conteúdo está protegido contra reprodução direta externa.',
+      diagnosticDetails: ['Indícios de APIs de proteção DRM de navegadores (EME / requestMediaKeySystemAccess).']
+    };
+  }
+
+  if (params.sourcesCount > 0) {
+    if (params.hasAccessibleDirectSource) {
+      details.push(`${params.sourcesCount} fonte(s) direta(s) encontrada(s) no HTML da página.`);
+      details.push('Pelo menos uma fonte direta respondeu com sucesso aos testes de conectividade e alcance.');
+      return {
+        status: 'direct_source_accessible',
+        summaryMessage: `Fonte direta encontrada e acessível (${params.sourcesCount} fonte(s) identificada(s)).`,
+        diagnosticDetails: details
+      };
+    } else {
+      details.push(`${params.sourcesCount} fonte(s) direta(s) encontrada(s), porém sem confirmação de leitura pública irrestrita.`);
+      return {
+        status: 'sources_found',
+        summaryMessage: `Fonte direta encontrada (${params.sourcesCount} fonte(s)), mas com restrições de permissão ou CORS no servidor remoto.`,
+        diagnosticDetails: details
+      };
+    }
+  }
+
+  if (params.iframesCount > 0) {
+    const domainText = params.firstIframeDomain ? ` do domínio "${params.firstIframeDomain}"` : '';
+    details.push(`${params.iframesCount} elemento(s) iframe detectado(s) no HTML da página.`);
+    details.push('Não é possível afirmar se existe um vídeo ativo apenas pela presença de um iframe.');
+    details.push('Por motivos de segurança e política de mesma origem (Same-Origin Policy), o conteúdo interno de iframes de terceiros não é acessado.');
+    return {
+      status: 'embedded_player_detected',
+      summaryMessage: `Player incorporado (iframe) identificado${domainText} (${params.iframesCount} frame(s) detectado(s)).`,
+      diagnosticDetails: details
+    };
+  }
+
+  if (params.dynamicIndicatorsCount > 0) {
+    details.push(`${params.dynamicIndicatorsCount} indicador(es) de carregamento dinâmico ou biblioteca de player encontrado(s) no HTML.`);
+    details.push('A página não expõe a URL de mídia diretamente no DOM estático; o fluxo de vídeo costuma ser solicitado sob demanda via requisições assíncronas do cliente.');
+    return {
+      status: 'dynamic_loading_detected',
+      summaryMessage: 'Possível carregamento dinâmico de mídia detectado. Bibliotecas de player ou configurações dinâmicas foram encontradas no código da página.',
+      diagnosticDetails: details
+    };
+  }
+
+  return {
+    status: 'no_sources',
+    summaryMessage: 'Nenhuma fonte aberta encontrada. A página não expõe tags de vídeo abertas, iframes incorporados nem scripts de carregamento de mídia.',
+    diagnosticDetails: ['O HTML analisado não contém tags <video>, <source>, metadados de compartilhamento ou referências a players.']
+  };
+}
+
+/**
+ * Analisa o HTML de uma página web e extrai fontes de vídeo abertas,
+ * elementos iframe (com domínio de origem) e referências a carregamento dinâmico
  */
 export async function extractMediaFromHtml(
   html: string,
   pageUrl: string
-): Promise<{ sources: ExtractedMediaSource[]; detectedDrm: boolean; detectedProtection: boolean; pageTitle: string }> {
+): Promise<{
+  sources: ExtractedMediaSource[];
+  detectedIframes: DetectedIframe[];
+  dynamicMediaIndicators: DynamicMediaIndicator[];
+  detectedDrm: boolean;
+  detectedProtection: boolean;
+  pageTitle: string;
+}> {
   const sourcesMap = new Map<string, ExtractedMediaSource>();
+  const detectedIframesMap = new Map<string, DetectedIframe>();
+  const dynamicIndicators: DynamicMediaIndicator[] = [];
   const pageTitle = extractTitle(html);
 
   // 1. Detecção de proteções ativas (DRM / EME / Cloudflare / CAPTCHA)
@@ -217,8 +334,104 @@ export async function extractMediaFromHtml(
     }
   }
 
+  // 7. Extração de elementos IFRAME e registro seguro de domínio de origem
+  // REQUISITO: Não afirmar que existe um vídeo só porque foi encontrado um iframe.
+  // Não buscar automaticamente todos os iframes encontrados (zero requisições ao destino).
+  const iframeRegex = /<iframe\b([^>]*)>/gi;
+  let iframeTagMatch: RegExpExecArray | null;
+  let pageUrlObj: URL | null = null;
+  try {
+    pageUrlObj = new URL(pageUrl);
+  } catch {
+    // URL base inválida
+  }
+
+  while ((iframeTagMatch = iframeRegex.exec(html)) !== null) {
+    const attrs = iframeTagMatch[1] || '';
+    // Procura src="..." ou data-src="..."
+    const srcMatch = attrs.match(/\bsrc=["']([^"']+)["']/i) || attrs.match(/\bdata-src=["']([^"']+)["']/i);
+    const titleMatch = attrs.match(/\btitle=["']([^"']+)["']/i);
+
+    if (srcMatch && srcMatch[1]) {
+      const rawSrc = srcMatch[1].trim();
+      const resolved = resolveUrlSafe(rawSrc, pageUrl);
+      if (resolved && !detectedIframesMap.has(resolved)) {
+        try {
+          const iframeUrlObj = new URL(resolved);
+          const domain = iframeUrlObj.hostname.toLowerCase();
+          const origin = iframeUrlObj.origin;
+          const isCrossOrigin = pageUrlObj ? iframeUrlObj.origin !== pageUrlObj.origin : true;
+
+          detectedIframesMap.set(resolved, {
+            url: resolved,
+            domain,
+            origin,
+            isCrossOrigin,
+            title: titleMatch ? titleMatch[1].trim() : undefined
+          });
+        } catch {
+          // Ignora URL malformada de iframe
+        }
+      }
+    }
+  }
+
+  // 8. Detecção estática de referências a players e carregamento dinâmico de mídia
+  // SEM executar JavaScript arbitrário da página analisada
+  const playerLibraries: Array<{ name: string; regex: RegExp; desc: string }> = [
+    { name: 'hls.js', regex: /\b(?:hls(?:\.min)?\.js|Hls\.isSupported|new\s+Hls\b)/i, desc: 'Biblioteca Hls.js identificada no código (gerencia streams .m3u8 via JavaScript)' },
+    { name: 'video.js', regex: /\b(?:video(?:\.min)?\.js|videojs\s*\()/i, desc: 'Framework Video.js identificado no código' },
+    { name: 'jwplayer', regex: /\b(?:jwplayer(?:\.js)?|jwplayer\s*\([^)]*\)\.setup)/i, desc: 'Framework JW Player identificado no código' },
+    { name: 'dash.js', regex: /\b(?:dash(?:\.all)?(?:\.min)?\.js|dashjs\b)/i, desc: 'Biblioteca Dash.js identificada no código' },
+    { name: 'plyr', regex: /\b(?:plyr(?:\.min)?\.js|new\s+Plyr\b)/i, desc: 'Biblioteca de player Plyr identificada no código' },
+    { name: 'clappr', regex: /\b(?:clappr(?:\.min)?\.js|new\s+Clappr\.Player\b)/i, desc: 'Biblioteca de player Clappr identificada no código' },
+    { name: 'shaka-player', regex: /\b(?:shaka-player|shaka\.Player\b)/i, desc: 'Shaka Player identificado no código' }
+  ];
+
+  for (const lib of playerLibraries) {
+    if (lib.regex.test(html)) {
+      dynamicIndicators.push({
+        type: 'player_library',
+        description: lib.desc,
+        patternMatched: lib.name
+      });
+    }
+  }
+
+  // Detecta atributos de dados de mídia em elementos HTML (ex: data-video, data-stream, data-file)
+  const dataVideoRegex = /\b(?:data-video(?:-url|-src)?|data-stream(?:-url)?|data-hls|data-mp4)=["']([^"']+)["']/gi;
+  let dataMatch: RegExpExecArray | null;
+  let dataCount = 0;
+  while ((dataMatch = dataVideoRegex.exec(html)) !== null && dataCount < 3) {
+    const rawVal = dataMatch[1];
+    dynamicIndicators.push({
+      type: 'data_attribute',
+      description: `Atributo de dados de vídeo detectado no elemento (${dataMatch[0].split('=')[0]})`,
+      patternMatched: rawVal.length > 60 ? `${rawVal.substring(0, 57)}...` : rawVal
+    });
+    dataCount++;
+  }
+
+  // Detecta chamadas de inicialização dinâmica ou streams embutidos em scripts (sem tag <video> direta)
+  if (sourcesMap.size === 0) {
+    const inlineScriptStreamRegex = /['"](https?:\\?\/\\?[^'"]+\.(?:m3u8|mp4)(?:\\?[^'"]*)?)['"]/gi;
+    let streamMatch: RegExpExecArray | null;
+    let inlineCount = 0;
+    while ((streamMatch = inlineScriptStreamRegex.exec(html)) !== null && inlineCount < 2) {
+      const matchedSnippet = streamMatch[1].replace(/\\\//g, '/');
+      dynamicIndicators.push({
+        type: 'media_config',
+        description: 'Referência a stream (.m3u8/.mp4) encontrada no interior de bloco de script/JSON',
+        patternMatched: matchedSnippet.length > 70 ? `${matchedSnippet.substring(0, 67)}...` : matchedSnippet
+      });
+      inlineCount++;
+    }
+  }
+
   return {
     sources: Array.from(sourcesMap.values()),
+    detectedIframes: Array.from(detectedIframesMap.values()),
+    dynamicMediaIndicators: dynamicIndicators,
     detectedDrm: hasDrmKeywords,
     detectedProtection: hasProtectionOrCaptcha,
     pageTitle

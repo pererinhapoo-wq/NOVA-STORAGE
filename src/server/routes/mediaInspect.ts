@@ -8,6 +8,7 @@ import {
   extractMediaFromHtml,
   probeMediaAccessibility,
   inferMediaFormat,
+  determineInspectionStatus,
   PageInspectionResult,
   ExtractedMediaSource
 } from '../services/pageMediaExtractor.ts';
@@ -70,18 +71,22 @@ mediaInspectRouter.post('/inspect-page', async (req, res) => {
         pageUrl: trimmedUrl,
         pageTitle: `Fluxo Direto de Mídia (${directFormat})`,
         sourcesFound: [directSource],
+        detectedIframes: [],
+        dynamicMediaIndicators: [],
         diagnostics: {
           fetchTimeMs: Date.now() - startTime,
           responseSizeBytes: 0,
           redirectCount: 0,
           detectedDrm: false,
           detectedProtectionOrCaptcha: false,
-          status: probe.accessible ? 'sources_found' : 'error',
+          detectedIframesCount: 0,
+          detectedDynamicLoading: false,
+          status: probe.accessible ? 'direct_source_accessible' : 'error',
           summaryMessage: probe.accessible
             ? probe.corsSupported
-              ? `Fonte de stream direto identificada e acessível (HTTP ${probe.statusCode || 200}${probe.supportsRange ? ' · Range 206 Ativo' : ''} · CORS Ativo).`
-              : `Fonte de stream identificada (HTTP ${probe.statusCode || 200}), mas sem cabeçalhos CORS.`
-            : `O servidor remoto recusou o acesso (HTTP ${probe.statusCode || 'Inacessível'}). ${probe.notes || ''}`
+              ? `Fonte direta de stream identificada e acessível (HTTP ${probe.statusCode || 200}${probe.supportsRange ? ' · Range 206 Ativo' : ''} · CORS Ativo).`
+              : `Fonte direta de stream identificada (HTTP ${probe.statusCode || 200}), mas sem cabeçalhos CORS declarados.`
+            : `O servidor remoto recusou o acesso direto (HTTP ${probe.statusCode || 'Inacessível'}). ${probe.notes || ''}`
         }
       };
 
@@ -110,7 +115,7 @@ mediaInspectRouter.post('/inspect-page', async (req, res) => {
       });
     }
 
-    // 5. Extração de metadados de vídeo da página
+    // 5. Extração de metadados de vídeo, iframes com domínio de origem e referências a players
     const extraction = await extractMediaFromHtml(pageResponse.body, pageResponse.finalUrl);
 
     // 6. Teste de acessibilidade e CORS para as primeiras fontes encontradas (máx 3 para performance)
@@ -135,34 +140,36 @@ mediaInspectRouter.post('/inspect-page', async (req, res) => {
       }
     }
 
-    let status: PageInspectionResult['diagnostics']['status'] = 'sources_found';
-    let summaryMessage = '';
-
-    if (extraction.detectedDrm) {
-      status = 'drm_or_protected';
-      summaryMessage = 'A página contém indícios de proteção DRM proprietária (ex: Widevine/FairPlay). A reprodução direta externa não é suportada nem autorizada por mecanismos abertos.';
-    } else if (testedSources.length === 0) {
-      status = 'no_sources';
-      summaryMessage = 'Nenhuma fonte de vídeo aberta (tags <video>, <source>, og:video ou JSON-LD) foi identificada nesta página.';
-    } else {
-      const hasCors = testedSources.some(s => s.corsSupported === true);
-      summaryMessage = hasCors
-        ? `${testedSources.length} fonte(s) identificada(s). Pelo menos uma fonte possui cabeçalhos CORS autorizados para reprodução direta.`
-        : `${testedSources.length} fonte(s) identificada(s), mas os servidores de origem não declaram CORS aberto. O teste de reprodução pode ser bloqueado pelo navegador.`;
-    }
+    // 7. Avaliação diagnóstica com diferenciação precisa dos 5 estados
+    const hasAccessibleDirectSource = testedSources.some(s => s.accessible === true);
+    const firstIframeDomain = extraction.detectedIframes[0]?.domain;
+    const statusEvaluation = determineInspectionStatus({
+      sourcesCount: testedSources.length,
+      hasAccessibleDirectSource,
+      detectedDrm: extraction.detectedDrm,
+      detectedProtection: extraction.detectedProtection,
+      iframesCount: extraction.detectedIframes.length,
+      dynamicIndicatorsCount: extraction.dynamicMediaIndicators.length,
+      firstIframeDomain
+    });
 
     const inspectionResult: PageInspectionResult = {
       pageUrl: pageResponse.finalUrl,
       pageTitle: extraction.pageTitle,
       sourcesFound: testedSources,
+      detectedIframes: extraction.detectedIframes,
+      dynamicMediaIndicators: extraction.dynamicMediaIndicators,
       diagnostics: {
         fetchTimeMs: Date.now() - startTime,
         responseSizeBytes: pageResponse.responseSizeBytes,
         redirectCount: pageResponse.redirectCount,
         detectedDrm: extraction.detectedDrm,
         detectedProtectionOrCaptcha: extraction.detectedProtection,
-        status,
-        summaryMessage
+        detectedIframesCount: extraction.detectedIframes.length,
+        detectedDynamicLoading: extraction.dynamicMediaIndicators.length > 0,
+        status: statusEvaluation.status,
+        summaryMessage: statusEvaluation.summaryMessage,
+        diagnosticDetails: statusEvaluation.diagnosticDetails
       }
     };
 
