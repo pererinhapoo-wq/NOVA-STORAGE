@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   extractMediaFromHtml,
-  inferMediaFormat
+  inferMediaFormat,
+  probeMediaAccessibility
 } from '../src/server/services/pageMediaExtractor.ts';
 
 test('Extração e Identificação de Mídias em Páginas Web', async (t) => {
@@ -128,5 +129,22 @@ test('Extração e Identificação de Mídias em Páginas Web', async (t) => {
     assert.strictEqual(result.sources.length, 0);
     assert.strictEqual(result.detectedDrm, false);
     assert.strictEqual(result.pageTitle, 'Artigo de Notícias');
+  });
+
+  await t.test('8. Diagnóstico de acessibilidade MP4: detecta status 403 Forbidden, negação de permissão e não atribui ao CORS indevidamente', async () => {
+    const probe = await probeMediaAccessibility('https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4');
+    assert.strictEqual(probe.accessible, false, 'Deveria ser marcado como inacessível devido ao código HTTP 403');
+    assert.strictEqual(probe.statusCode, 403, 'Código de status HTTP deve ser 403');
+    assert.strictEqual(probe.corsSupported, true, 'Bucket GCS envia Access-Control-Allow-Origin: *');
+    assert.strictEqual(probe.supportsRange, false, 'Objeto 403 não fornece 206 Partial Content');
+    assert.ok(probe.notes?.includes('403') || probe.notes?.includes('negado'), 'Notas devem registrar o código 403 ou acesso negado');
+  });
+
+  await t.test('9. Diagnóstico de acessibilidade MP4: detecta suporte a Range 206 Partial Content e CORS ativo em mídia pública', async () => {
+    const probe = await probeMediaAccessibility('https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4');
+    assert.strictEqual(probe.accessible, true, 'Arquivo público deve ser acessível');
+    assert.ok(probe.statusCode === 200 || probe.statusCode === 206, 'Código HTTP deve ser 200 ou 206');
+    assert.strictEqual(probe.corsSupported, true, 'MDN disponibiliza CORS aberto');
+    assert.strictEqual(probe.supportsRange, true, 'MDN suporta requisições parciais Range (bytes=0-1024)');
   });
 });

@@ -16,6 +16,7 @@ export interface ExtractedMediaSource {
   accessible: boolean | null;
   contentLengthBytes?: number;
   statusCode?: number;
+  supportsRange?: boolean;
   notes?: string;
 }
 

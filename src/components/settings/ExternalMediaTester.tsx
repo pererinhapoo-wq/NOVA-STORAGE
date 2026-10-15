@@ -36,8 +36,8 @@ type PlaybackState = 'idle' | 'connecting' | 'canplay' | 'playing' | 'error';
 
 // Presets de demonstração autorizada (Creative Commons / Open Source)
 const SAMPLE_HLS_URL = 'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8';
-const SAMPLE_MP4_URL = 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4';
-const SAMPLE_PAGE_URL = 'https://developer.mozilla.org/en-US/docs/Web/HTML/Element/video';
+const SAMPLE_MP4_GTV_URL = 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4';
+const SAMPLE_MP4_CC0_URL = 'https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4';
 
 export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNotify }) => {
   const [inputUrl, setInputUrl] = useState('');
@@ -231,28 +231,87 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
     } else {
       // Vídeo direto MP4 / WebM
       videoEl.src = mediaUrl;
-      const handleCanPlay = () => setPlaybackState('canplay');
-      const handleVideoErr = () => {
-        const code = videoEl.error?.code;
-        let msg = 'Erro ao reproduzir o arquivo de vídeo.';
-        if (code === 4) {
-          msg = 'O vídeo não pôde ser carregado (possível restrição de CORS na CDN remota ou formato incompatível).';
-        } else if (code === 2) {
-          msg = 'Erro de rede ao baixar o vídeo remoto.';
-        }
-        setPlaybackState('error');
-        setPlaybackErrorDetail(msg);
+      videoEl.load();
+
+      const handleLoadedMetadata = () => {
+        // Metadados carregados com sucesso pelo navegador
       };
 
+      const handleCanPlay = () => {
+        setPlaybackState('canplay');
+        setPlaybackErrorDetail(null);
+      };
+
+      const handlePlaying = () => {
+        setPlaybackState('playing');
+        setPlaybackErrorDetail(null);
+      };
+
+      const handleWaiting = () => {
+        setPlaybackState('connecting');
+      };
+
+      const handleVideoErr = () => {
+        const error = videoEl.error;
+        const code = error?.code;
+        const browserMsg = error?.message;
+
+        let codeDesc = '';
+        switch (code) {
+          case 1:
+            codeDesc = 'Operação cancelada (MEDIA_ERR_ABORTED - Código 1)';
+            break;
+          case 2:
+            codeDesc = 'Erro de rede na transferência do arquivo (MEDIA_ERR_NETWORK - Código 2)';
+            break;
+          case 3:
+            codeDesc = 'Falha na decodificação do container/codec (MEDIA_ERR_DECODE - Código 3)';
+            break;
+          case 4:
+            codeDesc = 'Fonte não suportada ou não pôde ser carregada (MEDIA_ERR_SRC_NOT_SUPPORTED - Código 4)';
+            break;
+          default:
+            codeDesc = `Erro no elemento de vídeo HTML5 (Código ${code ?? 'desconhecido'})`;
+        }
+
+        const diagnostics: string[] = [codeDesc];
+
+        if (browserMsg) {
+          diagnostics.push(`Navegador: ${browserMsg}`);
+        }
+
+        // Diagnóstico baseado em evidências concretas registradas na checagem
+        if (activeSource?.statusCode === 403) {
+          diagnostics.push('Causa confirmada: O servidor remoto recusou o acesso com código HTTP 403 Forbidden. O arquivo não possui permissão pública de leitura no armazenamento de origem.');
+        } else if (activeSource?.statusCode === 404) {
+          diagnostics.push('Causa confirmada: O servidor remoto retornou HTTP 404 Not Found (arquivo inexistente ou URL expirada).');
+        } else if (activeSource?.mimeType && !activeSource.mimeType.toLowerCase().includes('video')) {
+          diagnostics.push(`Causa confirmada: O servidor remoto retornou conteúdo "${activeSource.mimeType}" (XML/HTML) em vez de dados de vídeo binário.`);
+        } else if (activeSource?.corsSupported === false) {
+          diagnostics.push('Evidência de CORS: O servidor remoto não declarou o cabeçalho Access-Control-Allow-Origin, podendo causar bloqueio de origem cruzada no navegador.');
+        } else if (activeSource?.supportsRange === false) {
+          diagnostics.push('Evidência de Range: O servidor remoto não aceita requisições HTTP Range (206 Partial Content), essenciais para streaming de vídeo no navegador.');
+        }
+
+        setPlaybackState('error');
+        setPlaybackErrorDetail(diagnostics.join(' | '));
+      };
+
+      videoEl.addEventListener('loadedmetadata', handleLoadedMetadata);
       videoEl.addEventListener('canplay', handleCanPlay);
+      videoEl.addEventListener('playing', handlePlaying);
+      videoEl.addEventListener('waiting', handleWaiting);
       videoEl.addEventListener('error', handleVideoErr);
 
       return () => {
+        videoEl.removeEventListener('loadedmetadata', handleLoadedMetadata);
         videoEl.removeEventListener('canplay', handleCanPlay);
+        videoEl.removeEventListener('playing', handlePlaying);
+        videoEl.removeEventListener('waiting', handleWaiting);
         videoEl.removeEventListener('error', handleVideoErr);
       };
     }
-  }, [activeSource?.url, activeSource?.format, destroyHls]);
+  }, [activeSource?.url, activeSource?.format, activeSource?.statusCode, activeSource?.mimeType, activeSource?.corsSupported, activeSource?.supportsRange, destroyHls]);
 
   return (
     <div className="p-4 sm:p-6 rounded-xl bg-neutral-900/70 border border-neutral-800/80 space-y-6">
@@ -349,11 +408,19 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
           </button>
           <button
             type="button"
-            onClick={() => handleApplyPreset(SAMPLE_MP4_URL)}
+            onClick={() => handleApplyPreset(SAMPLE_MP4_GTV_URL)}
             className="px-2.5 py-1 text-xs font-mono text-cyan-400 hover:text-cyan-300 bg-neutral-900 hover:bg-neutral-800 border border-neutral-800 hover:border-cyan-500/40 rounded-md transition-colors cursor-pointer touch-manipulation select-none active:scale-95"
             aria-label="Preencher com exemplo de arquivo MP4 aberto"
           >
             Arquivo MP4 Aberto
+          </button>
+          <button
+            type="button"
+            onClick={() => handleApplyPreset(SAMPLE_MP4_CC0_URL)}
+            className="px-2.5 py-1 text-xs font-mono text-emerald-400 hover:text-emerald-300 bg-neutral-900 hover:bg-neutral-800 border border-neutral-800 hover:border-emerald-500/40 rounded-md transition-colors cursor-pointer touch-manipulation select-none active:scale-95"
+            aria-label="Preencher com exemplo de arquivo MP4 com suporte a Range 206"
+          >
+            MP4 com Range 206 (CC0)
           </button>
         </div>
       </div>
@@ -390,40 +457,57 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
               </div>
             </div>
 
-            {/* Estágio 2: Fonte Acessível (CORS / HTTP) */}
-            <div
-              className={`p-3 rounded-lg border flex items-start gap-2.5 ${
-                activeSource?.accessible
-                  ? activeSource.corsSupported
-                    ? 'bg-emerald-950/20 border-emerald-800/50'
-                    : 'bg-amber-950/20 border-amber-800/50'
-                  : 'bg-neutral-950/60 border-neutral-800'
-              }`}
-            >
-              <div className="mt-0.5">
-                {activeSource?.accessible ? (
-                  activeSource.corsSupported ? (
-                    <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                  ) : (
-                    <AlertTriangle className="w-4 h-4 text-amber-400" />
-                  )
-                ) : (
-                  <AlertCircle className="w-4 h-4 text-neutral-500" />
-                )}
-              </div>
-              <div className="min-w-0">
-                <span className="text-[11px] font-bold uppercase tracking-wider block text-neutral-200">
-                  2. Fonte Acessível
-                </span>
-                <span className="text-xs text-neutral-400 block truncate">
-                  {activeSource?.accessible
-                    ? activeSource.corsSupported
-                      ? 'HTTP 200 / CORS Autorizado'
-                      : 'Sem CORS declarado (Pode falhar no navegador)'
-                    : 'Aguardando verificação'}
-                </span>
-              </div>
-            </div>
+            {/* Estágio 2: Fonte Acessível (CORS / HTTP / Range) */}
+            {(() => {
+              const isChecked = activeSource && activeSource.accessible !== null && activeSource.accessible !== undefined;
+              const isAccessible = activeSource?.accessible === true;
+              const isDenied = activeSource?.accessible === false;
+              const isCors = activeSource?.corsSupported === true;
+              const statusCode = activeSource?.statusCode;
+
+              let cardBg = 'bg-neutral-950/60 border-neutral-800';
+              let icon = <AlertCircle className="w-4 h-4 text-neutral-500" />;
+              let title = '2. Fonte Acessível';
+              let subtitle = 'Aguardando verificação';
+
+              if (!isChecked) {
+                cardBg = 'bg-neutral-950/60 border-neutral-800';
+                icon = <AlertCircle className="w-4 h-4 text-neutral-500" />;
+                subtitle = 'Aguardando verificação de rede';
+              } else if (isAccessible) {
+                if (isCors) {
+                  cardBg = 'bg-emerald-950/20 border-emerald-800/50';
+                  icon = <CheckCircle2 className="w-4 h-4 text-emerald-400" />;
+                  subtitle = `HTTP ${statusCode || 200} · CORS Ativo (*) ${activeSource.supportsRange ? '· Range 206' : ''}`;
+                } else {
+                  cardBg = 'bg-amber-950/20 border-amber-800/50';
+                  icon = <AlertTriangle className="w-4 h-4 text-amber-400" />;
+                  subtitle = `HTTP ${statusCode || 200} · Sem CORS (Pode falhar no player)`;
+                }
+              } else if (isDenied) {
+                cardBg = 'bg-rose-950/25 border-rose-800/60';
+                icon = <AlertCircle className="w-4 h-4 text-rose-400" />;
+                subtitle = statusCode === 403
+                  ? 'Acesso Negado (HTTP 403 Forbidden)'
+                  : statusCode === 404
+                  ? 'Não Encontrado (HTTP 404 Not Found)'
+                  : `Inacessível (HTTP ${statusCode || 'Erro'})`;
+              }
+
+              return (
+                <div className={`p-3 rounded-lg border flex items-start gap-2.5 ${cardBg}`}>
+                  <div className="mt-0.5">{icon}</div>
+                  <div className="min-w-0">
+                    <span className="text-[11px] font-bold uppercase tracking-wider block text-neutral-200">
+                      {title}
+                    </span>
+                    <span className="text-xs text-neutral-400 block truncate" title={subtitle}>
+                      {subtitle}
+                    </span>
+                  </div>
+                </div>
+              );
+            })()}
 
             {/* Estágio 3: Reprodução Confirmada */}
             <div
@@ -502,16 +586,32 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
             <div className="p-4 rounded-xl bg-neutral-950/80 border border-neutral-800 space-y-3">
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
                 <div className="bg-neutral-900/60 p-2.5 rounded-lg border border-neutral-800/60">
-                  <span className="text-[10px] text-neutral-500 uppercase tracking-wider block">Título da Página</span>
-                  <span className="font-medium text-neutral-200 truncate block mt-0.5" title={inspectionResult.pageTitle}>
-                    {inspectionResult.pageTitle}
+                  <span className="text-[10px] text-neutral-500 uppercase tracking-wider block">Status HTTP & Código</span>
+                  <span
+                    className={`font-mono block mt-0.5 font-semibold ${
+                      activeSource.statusCode === 200 || activeSource.statusCode === 206
+                        ? 'text-emerald-400'
+                        : activeSource.statusCode === 403 || activeSource.statusCode === 404
+                        ? 'text-rose-400'
+                        : 'text-neutral-300'
+                    }`}
+                  >
+                    {activeSource.statusCode ? `HTTP ${activeSource.statusCode}` : 'Não avaliado'}
+                    {activeSource.statusCode === 403 && ' (Forbidden)'}
+                    {activeSource.statusCode === 404 && ' (Not Found)'}
+                    {activeSource.statusCode === 206 && ' (Partial Content)'}
+                    {activeSource.statusCode === 200 && ' (OK)'}
                   </span>
                 </div>
 
                 <div className="bg-neutral-900/60 p-2.5 rounded-lg border border-neutral-800/60">
-                  <span className="text-[10px] text-neutral-500 uppercase tracking-wider block">Formato & Método</span>
-                  <span className="font-mono text-cyan-400 block mt-0.5">
-                    {activeSource.format} ({activeSource.discoveryMethod})
+                  <span className="text-[10px] text-neutral-500 uppercase tracking-wider block">Suporte a Range (206)</span>
+                  <span
+                    className={`font-mono block mt-0.5 ${
+                      activeSource.supportsRange ? 'text-emerald-400 font-semibold' : 'text-neutral-400'
+                    }`}
+                  >
+                    {activeSource.supportsRange ? 'Suportado (206 Partial)' : 'Sem Range parcial'}
                   </span>
                 </div>
 
@@ -527,9 +627,16 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
                 </div>
 
                 <div className="bg-neutral-900/60 p-2.5 rounded-lg border border-neutral-800/60">
-                  <span className="text-[10px] text-neutral-500 uppercase tracking-wider block">Tempo de Resposta</span>
-                  <span className="font-mono text-neutral-300 block mt-0.5">
-                    {inspectionResult.diagnostics.fetchTimeMs} ms
+                  <span className="text-[10px] text-neutral-500 uppercase tracking-wider block">Tipo de Conteúdo (MIME)</span>
+                  <span
+                    className={`font-mono block mt-0.5 truncate ${
+                      activeSource.mimeType && !activeSource.mimeType.toLowerCase().includes('video')
+                        ? 'text-rose-400 font-semibold'
+                        : 'text-neutral-300'
+                    }`}
+                    title={activeSource.mimeType || activeSource.format}
+                  >
+                    {activeSource.mimeType || activeSource.format}
                   </span>
                 </div>
               </div>
@@ -557,7 +664,7 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
                     rel="noopener noreferrer"
                     className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-neutral-950 bg-cyan-400 hover:bg-cyan-300 rounded-md transition-colors"
                   >
-                    <span>Abrir Página Original</span>
+                    <span>Abrir Link Direto</span>
                     <ExternalLink className="w-3.5 h-3.5" />
                   </a>
                 </div>
@@ -619,17 +726,31 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
                   </p>
 
                   <div className="bg-neutral-950/70 p-3 rounded-lg border border-neutral-800/80 space-y-1.5 text-[11px] text-neutral-400">
-                    <span className="font-semibold text-neutral-300 block">Causas Frequentes de Falha Externa:</span>
+                    <span className="font-semibold text-neutral-300 block">Diagnóstico Baseado em Evidências:</span>
                     <ul className="list-disc list-inside space-y-1 text-neutral-400">
-                      <li>
-                        <strong>Bloqueio de CORS na CDN:</strong> O servidor de mídia não envia o cabeçalho <code className="text-cyan-400">Access-Control-Allow-Origin: *</code> para conexões de outros domínios.
-                      </li>
-                      <li>
-                        <strong>Validação de Referer:</strong> O servidor remoto rejeita requisições se o cabeçalho Referer não for o domínio do site de origem.
-                      </li>
-                      <li>
-                        <strong>Tokens Temporários Expirados:</strong> A URL extraída continha uma assinatura com validade curta que expirou antes da reprodução.
-                      </li>
+                      {activeSource.statusCode === 403 && (
+                        <li className="text-rose-300">
+                          <strong>Acesso Negado (HTTP 403 Forbidden):</strong> O servidor de origem (ex: Google Cloud Storage) retornou documento XML de recusa (AccessDenied). O arquivo é privado e não possui permissão de leitura anônima.
+                        </li>
+                      )}
+                      {activeSource.corsSupported ? (
+                        <li className="text-emerald-300">
+                          <strong>CORS Verificado:</strong> O servidor de origem retornou o cabeçalho <code className="text-emerald-400">Access-Control-Allow-Origin: *</code>. A falha NÃO foi causada por restrição de CORS.
+                        </li>
+                      ) : (
+                        <li className="text-amber-300">
+                          <strong>Ausência de CORS Declarado:</strong> O servidor de mídia não enviou cabeçalho de CORS aberto para conexões de outros domínios.
+                        </li>
+                      )}
+                      {activeSource.supportsRange ? (
+                        <li className="text-emerald-300">
+                          <strong>Suporte a Range:</strong> O servidor responde a requisições parciais (HTTP 206 Partial Content).
+                        </li>
+                      ) : (
+                        <li className="text-amber-300">
+                          <strong>Sem Suporte a Range (206):</strong> Arquivos MP4 transmitidos via streaming necessitam de suporte a requisições parciais por bytes para decodificação no navegador.
+                        </li>
+                      )}
                     </ul>
                   </div>
                 </div>

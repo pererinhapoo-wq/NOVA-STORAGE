@@ -62,6 +62,7 @@ mediaInspectRouter.post('/inspect-page', async (req, res) => {
         accessible: probe.accessible,
         contentLengthBytes: probe.contentLengthBytes,
         statusCode: probe.statusCode,
+        supportsRange: probe.supportsRange,
         notes: probe.notes || 'Link direto de stream fornecido pelo usuário.'
       };
 
@@ -75,10 +76,12 @@ mediaInspectRouter.post('/inspect-page', async (req, res) => {
           redirectCount: 0,
           detectedDrm: false,
           detectedProtectionOrCaptcha: false,
-          status: 'sources_found',
-          summaryMessage: probe.corsSupported
-            ? 'Fonte de stream direto identificada e acessível com CORS ativo.'
-            : 'Fonte de stream identificada, mas pode ter restrições de CORS no navegador.'
+          status: probe.accessible ? 'sources_found' : 'error',
+          summaryMessage: probe.accessible
+            ? probe.corsSupported
+              ? `Fonte de stream direto identificada e acessível (HTTP ${probe.statusCode || 200}${probe.supportsRange ? ' · Range 206 Ativo' : ''} · CORS Ativo).`
+              : `Fonte de stream identificada (HTTP ${probe.statusCode || 200}), mas sem cabeçalhos CORS.`
+            : `O servidor remoto recusou o acesso (HTTP ${probe.statusCode || 'Inacessível'}). ${probe.notes || ''}`
         }
       };
 
@@ -120,6 +123,7 @@ mediaInspectRouter.post('/inspect-page', async (req, res) => {
         accessible: probe.accessible,
         statusCode: probe.statusCode,
         contentLengthBytes: probe.contentLengthBytes,
+        supportsRange: probe.supportsRange,
         notes: probe.notes || src.notes
       });
     }

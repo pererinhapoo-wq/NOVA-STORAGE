@@ -18,6 +18,7 @@ export interface ExtractedMediaSource {
   accessible: boolean | null;
   contentLengthBytes?: number;
   statusCode?: number;
+  supportsRange?: boolean;
   notes?: string;
 }
 
@@ -233,6 +234,7 @@ export async function probeMediaAccessibility(mediaUrl: string): Promise<{
   statusCode?: number;
   contentLengthBytes?: number;
   mimeType?: string;
+  supportsRange?: boolean;
   notes?: string;
 }> {
   // 1. Validação SSRF rigorosa do endpoint de mídia antes de conectar
@@ -249,7 +251,7 @@ export async function probeMediaAccessibility(mediaUrl: string): Promise<{
   const timeoutId = setTimeout(() => controller.abort(), 4000); // 4s timeout
 
   try {
-    // Tenta uma requisição HEAD ou GET com cabeçalho de alcance curto (Range: bytes=0-1)
+    // Tenta uma requisição GET com cabeçalho de alcance curto (Range: bytes=0-1024) para testar 206 Partial Content
     const response = await fetch(mediaUrl, {
       method: 'GET',
       headers: {
@@ -267,17 +269,19 @@ export async function probeMediaAccessibility(mediaUrl: string): Promise<{
     const accessible = response.status >= 200 && response.status < 400;
     const contentLength = response.headers.get('content-length');
     const mimeType = response.headers.get('content-type') || undefined;
+    const acceptRanges = response.headers.get('accept-ranges');
+    const contentRange = response.headers.get('content-range');
+    const supportsRange = response.status === 206 || acceptRanges === 'bytes' || Boolean(contentRange);
 
     let notes = '';
-    if (accessible && corsSupported) {
-      notes = 'Fonte acessível publicamente com cabeçalhos CORS autorizados.';
-    } else if (accessible && !corsSupported) {
-      notes =
-        'A mídia respondeu com sucesso ao servidor, mas não declara cabeçalho Access-Control-Allow-Origin (*). Pode ser bloqueada pelo navegador ao tentar carregar diretamente no player.';
-    } else if (response.status === 403) {
-      notes = 'Acesso proibido (HTTP 403). A fonte pode exigir assinatura, autenticação ou bloqueio por Referer.';
+    if (response.status === 403) {
+      notes = `Acesso negado (HTTP 403 Forbidden). O arquivo é privado ou o servidor recusou a requisição anônima (Content-Type: ${mimeType || 'desconhecido'}).`;
     } else if (response.status === 404) {
-      notes = 'Arquivo não encontrado (HTTP 404). O link de mídia pode estar expirado ou inativo.';
+      notes = 'Arquivo não encontrado (HTTP 404 Not Found). O link de mídia pode estar expirado ou inativo.';
+    } else if (accessible) {
+      const rangeText = supportsRange ? 'Suporta Range (206 Partial Content)' : 'Sem Range parcial explícito';
+      const corsText = corsSupported ? 'CORS Habilitado' : 'Sem CORS Declarado';
+      notes = `HTTP ${response.status} (${mimeType || 'mídia'}) · ${rangeText} · ${corsText}.`;
     } else {
       notes = `Servidor respondeu com código HTTP ${response.status}.`;
     }
@@ -288,6 +292,7 @@ export async function probeMediaAccessibility(mediaUrl: string): Promise<{
       statusCode: response.status,
       contentLengthBytes: contentLength ? parseInt(contentLength, 10) : undefined,
       mimeType,
+      supportsRange,
       notes
     };
   } catch (err: any) {
