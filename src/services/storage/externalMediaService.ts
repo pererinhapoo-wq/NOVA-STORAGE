@@ -34,10 +34,20 @@ export interface DynamicMediaIndicator {
   patternMatched: string;
 }
 
+export interface InterstitialChallengeInfo {
+  detected: boolean;
+  provider: 'Cloudflare' | 'Google reCAPTCHA' | 'hCaptcha' | 'Proteção Intermediária' | 'Nenhum';
+  pageTitle: string;
+  httpStatusCode?: number;
+  contentType?: string;
+  evidence: string[];
+}
+
 export type InspectionStatus =
   | 'direct_source_accessible'
   | 'embedded_player_detected'
   | 'dynamic_loading_detected'
+  | 'challenge_or_interstitial_detected'
   | 'no_sources'
   | 'drm_or_protected'
   | 'sources_found'
@@ -49,6 +59,7 @@ export interface PageInspectionResult {
   sourcesFound: ExtractedMediaSource[];
   detectedIframes: DetectedIframe[];
   dynamicMediaIndicators: DynamicMediaIndicator[];
+  interstitialChallenge?: InterstitialChallengeInfo;
   diagnostics: {
     fetchTimeMs: number;
     responseSizeBytes: number;
@@ -57,6 +68,8 @@ export interface PageInspectionResult {
     detectedProtectionOrCaptcha: boolean;
     detectedIframesCount: number;
     detectedDynamicLoading: boolean;
+    httpStatusCode?: number;
+    contentType?: string;
     status: InspectionStatus;
     summaryMessage: string;
     diagnosticDetails?: string[];

@@ -36,10 +36,20 @@ export interface DynamicMediaIndicator {
   patternMatched: string;
 }
 
+export interface InterstitialChallengeInfo {
+  detected: boolean;
+  provider: 'Cloudflare' | 'Google reCAPTCHA' | 'hCaptcha' | 'Proteção Intermediária' | 'Nenhum';
+  pageTitle: string;
+  httpStatusCode?: number;
+  contentType?: string;
+  evidence: string[];
+}
+
 export type InspectionStatus =
   | 'direct_source_accessible'
   | 'embedded_player_detected'
   | 'dynamic_loading_detected'
+  | 'challenge_or_interstitial_detected'
   | 'no_sources'
   | 'drm_or_protected'
   | 'sources_found'
@@ -51,6 +61,7 @@ export interface PageInspectionResult {
   sourcesFound: ExtractedMediaSource[];
   detectedIframes: DetectedIframe[];
   dynamicMediaIndicators: DynamicMediaIndicator[];
+  interstitialChallenge?: InterstitialChallengeInfo;
   diagnostics: {
     fetchTimeMs: number;
     responseSizeBytes: number;
@@ -59,6 +70,8 @@ export interface PageInspectionResult {
     detectedProtectionOrCaptcha: boolean;
     detectedIframesCount: number;
     detectedDynamicLoading: boolean;
+    httpStatusCode?: number;
+    contentType?: string;
     status: InspectionStatus;
     summaryMessage: string;
     diagnosticDetails?: string[];
@@ -122,21 +135,26 @@ function extractTitle(html: string): string {
 }
 
 /**
- * Determina o status da inspeção diferenciando claramente os 5 cenários:
+ * Determina o status da inspeção diferenciando claramente os cenários:
  * 1. Nenhuma fonte aberta encontrada
  * 2. Player incorporado (iframe) identificado
  * 3. Possível carregamento dinâmico de mídia
  * 4. Fonte direta encontrada e acessível
- * 5. (Reprodução confirmada ocorre no player no cliente)
+ * 5. Página intermediária ou desafio de proteção (Cloudflare/Anti-Bot/Turnstile)
+ * 6. (Reprodução confirmada ocorre no player no cliente)
  */
 export function determineInspectionStatus(params: {
   sourcesCount: number;
   hasAccessibleDirectSource: boolean;
   detectedDrm: boolean;
   detectedProtection: boolean;
+  detectedChallenge?: boolean;
+  challengeInfo?: InterstitialChallengeInfo;
   iframesCount: number;
   dynamicIndicatorsCount: number;
   firstIframeDomain?: string;
+  httpStatusCode?: number;
+  contentType?: string;
 }): {
   status: InspectionStatus;
   summaryMessage: string;
@@ -149,6 +167,31 @@ export function determineInspectionStatus(params: {
       status: 'drm_or_protected',
       summaryMessage: 'Proteção DRM proprietária detectada (ex: Widevine/FairPlay). O conteúdo está protegido contra reprodução direta externa.',
       diagnosticDetails: ['Indícios de APIs de proteção DRM de navegadores (EME / requestMediaKeySystemAccess).']
+    };
+  }
+
+  // Detecção explícita de página intermediária ou desafio de acesso (ex: Cloudflare "Just a moment...")
+  // REQUISITO: Não afirmar que o episódio não possui vídeo; apresentar como limitação de acesso.
+  if ((params.detectedChallenge || params.detectedProtection) && params.sourcesCount === 0) {
+    const provider = params.challengeInfo?.provider || 'Proteção Intermediária';
+    const title = params.challengeInfo?.pageTitle || 'Just a moment...';
+    const statusText = params.httpStatusCode ? `HTTP ${params.httpStatusCode}` : 'Resposta do Servidor';
+
+    details.push(`Resposta interceptada por desafio de proteção (${provider}) · ${statusText}.`);
+    details.push(`Título da resposta recebida pelo servidor: "${title}".`);
+    if (params.contentType) {
+      details.push(`Tipo de conteúdo retornado: ${params.contentType}.`);
+    }
+    if (params.challengeInfo?.evidence && params.challengeInfo.evidence.length > 0) {
+      details.push(`Indício(s) detectado(s): ${params.challengeInfo.evidence.join('; ')}.`);
+    }
+    details.push('Limitação de Acesso Automatizado: O episódio pode conter vídeo e reproduzir normalmente no seu navegador, mas a requisição do analisador recebeu uma página intermediária de proteção.');
+    details.push('Por motivos de conformidade e segurança, o NOVA STORAGE não tenta resolver CAPTCHAs, contornar firewalls anti-bot nem executar scripts do intermediário.');
+
+    return {
+      status: 'challenge_or_interstitial_detected',
+      summaryMessage: `Página intermediária ou desafio de acesso detectado (${provider}). O servidor retornou uma tela de verificação temporária em vez do conteúdo do episódio. Isso representa uma limitação de acesso do analisador, não a ausência de vídeo.`,
+      diagnosticDetails: details
     };
   }
 
@@ -202,15 +245,18 @@ export function determineInspectionStatus(params: {
 
 /**
  * Analisa o HTML de uma página web e extrai fontes de vídeo abertas,
- * elementos iframe (com domínio de origem) e referências a carregamento dinâmico
+ * elementos iframe (com domínio de origem), referências a carregamento dinâmico
+ * e páginas intermediárias de proteção (Cloudflare/Anti-Bot)
  */
 export async function extractMediaFromHtml(
   html: string,
-  pageUrl: string
+  pageUrl: string,
+  options?: { httpStatus?: number; contentType?: string }
 ): Promise<{
   sources: ExtractedMediaSource[];
   detectedIframes: DetectedIframe[];
   dynamicMediaIndicators: DynamicMediaIndicator[];
+  interstitialChallenge: InterstitialChallengeInfo;
   detectedDrm: boolean;
   detectedProtection: boolean;
   pageTitle: string;
@@ -219,8 +265,9 @@ export async function extractMediaFromHtml(
   const detectedIframesMap = new Map<string, DetectedIframe>();
   const dynamicIndicators: DynamicMediaIndicator[] = [];
   const pageTitle = extractTitle(html);
+  const challengeEvidence: string[] = [];
 
-  // 1. Detecção de proteções ativas (DRM / EME / Cloudflare / CAPTCHA)
+  // 1. Detecção de proteções ativas (DRM / EME)
   const hasDrmKeywords =
     html.includes('requestMediaKeySystemAccess') ||
     html.includes('com.widevine.alpha') ||
@@ -228,11 +275,72 @@ export async function extractMediaFromHtml(
     html.includes('playready') ||
     html.includes('drmSecurity');
 
-  const hasProtectionOrCaptcha =
+  // 1.1 Detecção de Desafios Intermediários e Telas Anti-Bot (Cloudflare / Turnstile / CAPTCHA)
+  const titleLower = pageTitle.toLowerCase();
+  const isCloudflareTitle =
+    titleLower.includes('just a moment') ||
+    titleLower.includes('attention required') ||
+    titleLower.includes('checking your browser') ||
+    titleLower.includes('cloudflare');
+
+  if (isCloudflareTitle) {
+    challengeEvidence.push(`Título de verificação intermediária: "${pageTitle}"`);
+  }
+
+  const hasCloudflarePlatform =
+    html.includes('challenges.cloudflare.com') ||
+    html.includes('cf-mitigated') ||
+    html.includes('cf-chl-') ||
+    html.includes('challenge-platform') ||
     html.includes('cf-challenge-running') ||
-    html.includes('turnstile') ||
-    html.includes('g-recaptcha') ||
-    html.includes('hcaptcha');
+    html.includes('cf-browser-verification') ||
+    html.includes('cf_chl_prog') ||
+    html.includes('turnstile');
+
+  if (hasCloudflarePlatform) {
+    challengeEvidence.push('Plataforma de Desafios/Turnstile da Cloudflare no corpo HTML');
+  }
+
+  if (html.includes('DDoS protection by Cloudflare')) {
+    challengeEvidence.push('Mensagem de proteção anti-DDoS por Cloudflare');
+  }
+
+  if (html.includes('Ray ID:') || html.includes('ray-id')) {
+    challengeEvidence.push('Identificador de requisição Cloudflare (Ray ID)');
+  }
+
+  if (html.includes('enable JavaScript and cookies to continue') || html.includes('Enable JavaScript and cookies')) {
+    challengeEvidence.push('Exigência de execução de JavaScript e cookies do navegador');
+  }
+
+  const isRecaptcha = html.includes('g-recaptcha') || html.includes('google.com/recaptcha');
+  if (isRecaptcha) {
+    challengeEvidence.push('Widget de verificação Google reCAPTCHA');
+  }
+
+  const isHcaptcha = html.includes('hcaptcha');
+  if (isHcaptcha) {
+    challengeEvidence.push('Widget de verificação hCaptcha');
+  }
+
+  const isCloudflare = isCloudflareTitle || hasCloudflarePlatform || html.includes('DDoS protection by Cloudflare');
+  const detectedChallenge = isCloudflare || isRecaptcha || isHcaptcha || isCloudflareTitle;
+  const hasProtectionOrCaptcha = detectedChallenge || hasDrmKeywords;
+
+  let challengeProvider: InterstitialChallengeInfo['provider'] = 'Nenhum';
+  if (isCloudflare) challengeProvider = 'Cloudflare';
+  else if (isRecaptcha) challengeProvider = 'Google reCAPTCHA';
+  else if (isHcaptcha) challengeProvider = 'hCaptcha';
+  else if (detectedChallenge) challengeProvider = 'Proteção Intermediária';
+
+  const interstitialChallenge: InterstitialChallengeInfo = {
+    detected: detectedChallenge,
+    provider: challengeProvider,
+    pageTitle,
+    httpStatusCode: options?.httpStatus,
+    contentType: options?.contentType,
+    evidence: challengeEvidence
+  };
 
   // 2. Extração de tags <video src="...">
   const videoSrcRegex = /<video[^>]+src=["']([^"']+)["'][^>]*>/gi;
@@ -432,6 +540,7 @@ export async function extractMediaFromHtml(
     sources: Array.from(sourcesMap.values()),
     detectedIframes: Array.from(detectedIframesMap.values()),
     dynamicMediaIndicators: dynamicIndicators,
+    interstitialChallenge,
     detectedDrm: hasDrmKeywords,
     detectedProtection: hasProtectionOrCaptcha,
     pageTitle

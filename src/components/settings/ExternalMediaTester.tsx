@@ -102,6 +102,14 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
               'success'
             );
           }
+        } else if (diag.status === 'challenge_or_interstitial_detected') {
+          if (onNotify) {
+            onNotify(
+              'Página Intermediária Detectada',
+              `O servidor retornou um desafio anti-bot (${response.result.interstitialChallenge?.provider || 'Proteção'}). Limitação de acesso, não ausência de vídeo.`,
+              'info'
+            );
+          }
         } else if (diag.status === 'embedded_player_detected') {
           if (onNotify) {
             onNotify(
@@ -445,13 +453,15 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
       {/* Painel com Diagnóstico e Estágios de Confirmação */}
       {inspectionResult && (
         <div className="space-y-4 pt-1">
-          {/* Banner de Diagnóstico Principal - 5 Estados Claros */}
+          {/* Banner de Diagnóstico Principal - Estados Claros */}
           <div
             className={`p-3.5 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
               playbackState === 'playing'
                 ? 'bg-emerald-950/30 border-emerald-500/50 text-emerald-300'
                 : inspectionResult.diagnostics.status === 'direct_source_accessible'
                 ? 'bg-emerald-950/20 border-emerald-800/50 text-emerald-300'
+                : inspectionResult.diagnostics.status === 'challenge_or_interstitial_detected'
+                ? 'bg-amber-950/30 border-amber-500/50 text-amber-200'
                 : inspectionResult.diagnostics.status === 'embedded_player_detected'
                 ? 'bg-indigo-950/25 border-indigo-800/50 text-indigo-300'
                 : inspectionResult.diagnostics.status === 'dynamic_loading_detected'
@@ -467,6 +477,8 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
                   <Play className="w-5 h-5 text-emerald-400 fill-current" />
                 ) : inspectionResult.diagnostics.status === 'direct_source_accessible' ? (
                   <CheckCircle2 className="w-5 h-5 text-emerald-400" />
+                ) : inspectionResult.diagnostics.status === 'challenge_or_interstitial_detected' ? (
+                  <ShieldCheck className="w-5 h-5 text-amber-400" />
                 ) : inspectionResult.diagnostics.status === 'embedded_player_detected' ? (
                   <Layers className="w-5 h-5 text-indigo-400" />
                 ) : inspectionResult.diagnostics.status === 'dynamic_loading_detected' ? (
@@ -484,6 +496,8 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
                       ? '5. Reprodução Confirmada no Navegador'
                       : inspectionResult.diagnostics.status === 'direct_source_accessible'
                       ? '4. Fonte Direta Encontrada e Acessível'
+                      : inspectionResult.diagnostics.status === 'challenge_or_interstitial_detected'
+                      ? 'Página Intermediária / Desafio Anti-Bot Detectado'
                       : inspectionResult.diagnostics.status === 'embedded_player_detected'
                       ? '2. Player Incorporado (iframe) Identificado'
                       : inspectionResult.diagnostics.status === 'dynamic_loading_detected'
@@ -513,6 +527,8 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
               className={`p-3 rounded-lg border flex items-start gap-2.5 ${
                 inspectionResult.sourcesFound.length > 0
                   ? 'bg-emerald-950/20 border-emerald-800/50'
+                  : inspectionResult.diagnostics.status === 'challenge_or_interstitial_detected'
+                  ? 'bg-amber-950/20 border-amber-800/50'
                   : (inspectionResult.detectedIframes?.length || 0) > 0
                   ? 'bg-indigo-950/20 border-indigo-800/40'
                   : (inspectionResult.dynamicMediaIndicators?.length || 0) > 0
@@ -523,6 +539,8 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
               <div className="mt-0.5">
                 {inspectionResult.sourcesFound.length > 0 ? (
                   <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                ) : inspectionResult.diagnostics.status === 'challenge_or_interstitial_detected' ? (
+                  <ShieldCheck className="w-4 h-4 text-amber-400" />
                 ) : (inspectionResult.detectedIframes?.length || 0) > 0 ? (
                   <Layers className="w-4 h-4 text-indigo-400" />
                 ) : (inspectionResult.dynamicMediaIndicators?.length || 0) > 0 ? (
@@ -538,6 +556,8 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
                 <span className="text-xs text-neutral-400 block truncate">
                   {inspectionResult.sourcesFound.length > 0
                     ? `${inspectionResult.sourcesFound.length} fonte(s) direta(s) aberta(s)`
+                    : inspectionResult.diagnostics.status === 'challenge_or_interstitial_detected'
+                    ? `Página intermediária (${inspectionResult.interstitialChallenge?.provider || 'Proteção'})`
                     : (inspectionResult.detectedIframes?.length || 0) > 0
                     ? `${inspectionResult.detectedIframes?.length} iframe(s) incorporado(s)`
                     : (inspectionResult.dynamicMediaIndicators?.length || 0) > 0
@@ -560,7 +580,11 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
               let title = '2. Fonte Acessível';
               let subtitle = 'Aguardando verificação';
 
-              if (inspectionResult.sourcesFound.length === 0) {
+              if (inspectionResult.diagnostics.status === 'challenge_or_interstitial_detected') {
+                cardBg = 'bg-amber-950/20 border-amber-800/40';
+                icon = <AlertCircle className="w-4 h-4 text-amber-400" />;
+                subtitle = `Acesso interceptado (${inspectionResult.diagnostics.httpStatusCode ? `HTTP ${inspectionResult.diagnostics.httpStatusCode}` : 'Desafio'})`;
+              } else if (inspectionResult.sourcesFound.length === 0) {
                 cardBg = 'bg-neutral-950/40 border-neutral-800/60';
                 icon = <AlertCircle className="w-4 h-4 text-neutral-600" />;
                 subtitle = (inspectionResult.detectedIframes?.length || 0) > 0
@@ -643,6 +667,8 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
                     ? 'Bufferizando Fragmentos...'
                     : playbackState === 'error'
                     ? 'Falha na Reprodução'
+                    : inspectionResult.diagnostics.status === 'challenge_or_interstitial_detected'
+                    ? 'Aguardando página com player'
                     : inspectionResult.sourcesFound.length === 0
                     ? 'Nenhuma mídia direta para reproduzir'
                     : 'Aguardando Início do Player'}
@@ -650,6 +676,77 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
               </div>
             </div>
           </div>
+
+          {/* Card Detalhado de Página Intermediária ou Desafio de Proteção */}
+          {inspectionResult.interstitialChallenge?.detected && (
+            <div className="p-4 rounded-xl bg-amber-950/25 border border-amber-800/50 space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <div className="w-7 h-7 rounded-lg bg-amber-950 border border-amber-800/60 flex items-center justify-center text-amber-400 shrink-0">
+                    <ShieldCheck className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h4 className="text-xs font-bold text-amber-200 uppercase tracking-wide">
+                      Página Intermediária de Proteção Detectada ({inspectionResult.interstitialChallenge.provider})
+                    </h4>
+                    <span className="text-[11px] text-neutral-400">
+                      Resposta interceptada por desafio anti-bot antes do carregamento do conteúdo
+                    </span>
+                  </div>
+                </div>
+                <span className="text-[10px] font-mono font-medium px-2 py-0.5 rounded bg-amber-950 border border-amber-800/60 text-amber-300 self-start sm:self-auto">
+                  LIMITAÇÃO DE ACESSO · NÃO AFIRMA AUSÊNCIA DE VÍDEO
+                </span>
+              </div>
+
+              <div className="p-2.5 rounded-lg bg-neutral-950/60 border border-neutral-800/70 text-xs text-neutral-300 space-y-1.5 leading-relaxed">
+                <p>
+                  <strong>Por que o analisador não encontrou o vídeo se ele funciona no navegador?</strong> O servidor remoto ({inspectionResult.interstitialChallenge.provider}) enviou uma página intermediária de verificação temporária (ex: <em>"Just a moment..."</em>). No seu navegador comum, essa verificação é resolvida automaticamente em tempo de execução via JavaScript e cookies locais de sessão.
+                </p>
+                <p className="text-[11px] text-neutral-400">
+                  Como o analisador do NOVA STORAGE cumpre rigorosamente as normas de segurança, não executa scripts arbitrários do site, não extrai credenciais nem utiliza proxies para contornar desafios de proteção, a requisição automatizada recebeu apenas o HTML da tela de proteção.
+                </p>
+              </div>
+
+              {/* Tabela de Metadados Seguros da Resposta */}
+              <div className="space-y-2">
+                <span className="text-[11px] font-semibold text-neutral-300 block">
+                  Metadados Seguros da Resposta Recebida:
+                </span>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2 text-xs font-mono">
+                  <div className="bg-neutral-950/80 p-2 rounded-lg border border-neutral-800/80">
+                    <span className="text-[10px] text-neutral-500 uppercase block">Status HTTP</span>
+                    <span className="text-amber-400 font-semibold block mt-0.5">
+                      {inspectionResult.diagnostics.httpStatusCode ? `HTTP ${inspectionResult.diagnostics.httpStatusCode}` : '200 OK'}
+                    </span>
+                  </div>
+                  <div className="bg-neutral-950/80 p-2 rounded-lg border border-neutral-800/80">
+                    <span className="text-[10px] text-neutral-500 uppercase block">Mecanismo</span>
+                    <span className="text-cyan-300 font-semibold block mt-0.5">
+                      {inspectionResult.interstitialChallenge.provider}
+                    </span>
+                  </div>
+                  <div className="bg-neutral-950/80 p-2 rounded-lg border border-neutral-800/80 sm:col-span-2">
+                    <span className="text-[10px] text-neutral-500 uppercase block">Título da Resposta</span>
+                    <span className="text-neutral-200 truncate block mt-0.5" title={inspectionResult.interstitialChallenge.pageTitle}>
+                      "{inspectionResult.interstitialChallenge.pageTitle}"
+                    </span>
+                  </div>
+                </div>
+
+                {inspectionResult.interstitialChallenge.evidence.length > 0 && (
+                  <div className="bg-neutral-950/70 p-2 rounded-lg border border-neutral-800/60 space-y-1">
+                    <span className="text-[10px] uppercase text-neutral-500 font-mono block">Evidências Técnicas Registradas:</span>
+                    <ul className="list-disc list-inside space-y-0.5 text-[11px] text-neutral-400">
+                      {inspectionResult.interstitialChallenge.evidence.map((ev, i) => (
+                        <li key={i}>{ev}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
 
           {/* Card Detalhado de Players Incorporados (iframes) */}
           {inspectionResult.detectedIframes && inspectionResult.detectedIframes.length > 0 && (
@@ -889,7 +986,9 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
           {inspectionResult.sourcesFound.length === 0 && (
             <div
               className={`p-4 rounded-xl border text-xs space-y-2 ${
-                inspectionResult.diagnostics.status === 'embedded_player_detected'
+                inspectionResult.diagnostics.status === 'challenge_or_interstitial_detected'
+                  ? 'bg-amber-950/20 border-amber-800/40 text-amber-300'
+                  : inspectionResult.diagnostics.status === 'embedded_player_detected'
                   ? 'bg-indigo-950/20 border-indigo-800/40 text-indigo-300'
                   : inspectionResult.diagnostics.status === 'dynamic_loading_detected'
                   ? 'bg-amber-950/20 border-amber-800/40 text-amber-300'
@@ -901,7 +1000,9 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
                 <span>{inspectionResult.diagnostics.summaryMessage}</span>
               </div>
               <p className="text-neutral-400 text-[11px] leading-relaxed">
-                {inspectionResult.diagnostics.status === 'embedded_player_detected'
+                {inspectionResult.diagnostics.status === 'challenge_or_interstitial_detected'
+                  ? 'Atenção: Esta resposta representa uma limitação de acesso automatizado devido a uma proteção intermediária (ex: Cloudflare "Just a moment..."), e NÃO significa que o episódio não possui vídeo no site de origem. O vídeo pode estar presente e funcional no navegador de uso comum.'
+                  : inspectionResult.diagnostics.status === 'embedded_player_detected'
                   ? 'O conteúdo desta página depende de um iframe isolado de outro domínio. O NOVA STORAGE respeita os limites de segurança da web e não executa scraping forçado nem acessa conteúdo protegido de terceiros.'
                   : inspectionResult.diagnostics.status === 'dynamic_loading_detected'
                   ? 'O streaming de vídeo desta página é orquestrado sob demanda via JavaScript dinâmico no navegador. Fontes diretas estáticas (.m3u8/.mp4) não foram expostas no HTML inicial.'

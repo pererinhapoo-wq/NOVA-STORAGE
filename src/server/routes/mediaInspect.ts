@@ -115,8 +115,11 @@ mediaInspectRouter.post('/inspect-page', async (req, res) => {
       });
     }
 
-    // 5. Extração de metadados de vídeo, iframes com domínio de origem e referências a players
-    const extraction = await extractMediaFromHtml(pageResponse.body, pageResponse.finalUrl);
+    // 5. Extração de metadados de vídeo, iframes com domínio de origem e detecção de desafios anti-bot
+    const extraction = await extractMediaFromHtml(pageResponse.body, pageResponse.finalUrl, {
+      httpStatus: pageResponse.status,
+      contentType: pageResponse.contentType
+    });
 
     // 6. Teste de acessibilidade e CORS para as primeiras fontes encontradas (máx 3 para performance)
     const testedSources: ExtractedMediaSource[] = [];
@@ -140,7 +143,7 @@ mediaInspectRouter.post('/inspect-page', async (req, res) => {
       }
     }
 
-    // 7. Avaliação diagnóstica com diferenciação precisa dos 5 estados
+    // 7. Avaliação diagnóstica com diferenciação precisa de estados (incluindo desafios intermediários)
     const hasAccessibleDirectSource = testedSources.some(s => s.accessible === true);
     const firstIframeDomain = extraction.detectedIframes[0]?.domain;
     const statusEvaluation = determineInspectionStatus({
@@ -148,9 +151,13 @@ mediaInspectRouter.post('/inspect-page', async (req, res) => {
       hasAccessibleDirectSource,
       detectedDrm: extraction.detectedDrm,
       detectedProtection: extraction.detectedProtection,
+      detectedChallenge: extraction.interstitialChallenge?.detected,
+      challengeInfo: extraction.interstitialChallenge,
       iframesCount: extraction.detectedIframes.length,
       dynamicIndicatorsCount: extraction.dynamicMediaIndicators.length,
-      firstIframeDomain
+      firstIframeDomain,
+      httpStatusCode: pageResponse.status,
+      contentType: pageResponse.contentType
     });
 
     const inspectionResult: PageInspectionResult = {
@@ -159,14 +166,17 @@ mediaInspectRouter.post('/inspect-page', async (req, res) => {
       sourcesFound: testedSources,
       detectedIframes: extraction.detectedIframes,
       dynamicMediaIndicators: extraction.dynamicMediaIndicators,
+      interstitialChallenge: extraction.interstitialChallenge,
       diagnostics: {
         fetchTimeMs: Date.now() - startTime,
         responseSizeBytes: pageResponse.responseSizeBytes,
         redirectCount: pageResponse.redirectCount,
         detectedDrm: extraction.detectedDrm,
-        detectedProtectionOrCaptcha: extraction.detectedProtection,
+        detectedProtectionOrCaptcha: extraction.detectedProtection || (extraction.interstitialChallenge?.detected ?? false),
         detectedIframesCount: extraction.detectedIframes.length,
         detectedDynamicLoading: extraction.dynamicMediaIndicators.length > 0,
+        httpStatusCode: pageResponse.status,
+        contentType: pageResponse.contentType,
         status: statusEvaluation.status,
         summaryMessage: statusEvaluation.summaryMessage,
         diagnosticDetails: statusEvaluation.diagnosticDetails

@@ -335,5 +335,134 @@ test('Extração e Identificação de Mídias em Páginas Web', async (t) => {
       dynamicIndicatorsCount: 0
     });
     assert.strictEqual(stateDrm.status, 'drm_or_protected');
+
+    // Estado 5: Página intermediária / desafio de proteção (Cloudflare "Just a moment...")
+    const stateChallenge = determineInspectionStatus({
+      sourcesCount: 0,
+      hasAccessibleDirectSource: false,
+      detectedDrm: false,
+      detectedProtection: true,
+      detectedChallenge: true,
+      challengeInfo: {
+        detected: true,
+        provider: 'Cloudflare',
+        pageTitle: 'Just a moment...',
+        httpStatusCode: 403,
+        contentType: 'text/html; charset=UTF-8',
+        evidence: ['Título "Just a moment..."', 'cf-mitigated="challenge"']
+      },
+      iframesCount: 0,
+      dynamicIndicatorsCount: 0,
+      httpStatusCode: 403,
+      contentType: 'text/html; charset=UTF-8'
+    });
+    assert.strictEqual(stateChallenge.status, 'challenge_or_interstitial_detected');
+    assert.ok(stateChallenge.summaryMessage.includes('limitação de acesso'));
+    assert.ok(stateChallenge.summaryMessage.includes('não a ausência de vídeo'));
+  });
+
+  await t.test('15. Detecta resposta intermediária Cloudflare "Just a moment..." e registra metadados seguros como limitação de acesso', async () => {
+    // Simulação do HTML retornado pela Cloudflare em https://www.dattebayo-br.com/videos/510117
+    const cloudflareHtml = `
+      <!DOCTYPE html>
+      <html lang="en-US">
+        <head>
+          <title>Just a moment...</title>
+          <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+          <script src="/cdn-cgi/challenge-platform/scripts/jsd/main.js"></script>
+        </head>
+        <body class="no-js">
+          <div class="main-content" data-translate="challenge_headline">
+            <h1 class="zone-name-title h1">www.dattebayo-br.com</h1>
+            <h2 class="h2" id="challenge-running">Checking your browser before accessing www.dattebayo-br.com.</h2>
+          </div>
+          <div id="challenge-body-text" class="core-msg spacer">
+            <p data-translate="process_mode">Enable JavaScript and cookies to continue</p>
+          </div>
+          <div id="cf-please-wait">
+            <div id="spinner"></div>
+            <p id="cf-spinner-please-wait">Please stand by, while we are checking your browser...</p>
+          </div>
+          <div class="footer" role="contentinfo">
+            <div class="footer-inner">
+              <div class="clearfix diagnostic-wrapper">
+                <div class="ray-id">Ray ID: <code>8b123456789abcde</code></div>
+              </div>
+              <div class="text-center" id="cf-footer-text">DDoS protection by Cloudflare</div>
+            </div>
+          </div>
+        </body>
+      </html>
+    `;
+
+    const result = await extractMediaFromHtml(
+      cloudflareHtml,
+      'https://www.dattebayo-br.com/videos/510117',
+      { httpStatus: 403, contentType: 'text/html; charset=UTF-8' }
+    );
+
+    // 1. Não afirma que há ou não há vídeo
+    assert.strictEqual(result.sources.length, 0);
+    assert.strictEqual(result.detectedIframes.length, 0);
+
+    // 2. Metadados seguros capturados com precisão
+    assert.strictEqual(result.pageTitle, 'Just a moment...');
+    assert.strictEqual(result.interstitialChallenge.detected, true);
+    assert.strictEqual(result.interstitialChallenge.provider, 'Cloudflare');
+    assert.strictEqual(result.interstitialChallenge.httpStatusCode, 403);
+    assert.strictEqual(result.interstitialChallenge.contentType, 'text/html; charset=UTF-8');
+    assert.ok(result.interstitialChallenge.evidence.length >= 2);
+
+    // 3. Classificação de status como limitação de acesso (não ausência de vídeo)
+    const statusResult = determineInspectionStatus({
+      sourcesCount: result.sources.length,
+      hasAccessibleDirectSource: false,
+      detectedDrm: result.detectedDrm,
+      detectedProtection: result.detectedProtection,
+      detectedChallenge: result.interstitialChallenge.detected,
+      challengeInfo: result.interstitialChallenge,
+      iframesCount: result.detectedIframes.length,
+      dynamicIndicatorsCount: result.dynamicMediaIndicators.length,
+      httpStatusCode: 403,
+      contentType: 'text/html; charset=UTF-8'
+    });
+
+    assert.strictEqual(statusResult.status, 'challenge_or_interstitial_detected');
+    assert.ok(statusResult.summaryMessage.includes('Cloudflare'));
+    assert.ok(statusResult.summaryMessage.includes('limitação de acesso'));
+    assert.ok(statusResult.summaryMessage.includes('não a ausência de vídeo'));
+    assert.ok(statusResult.diagnosticDetails.some(d => d.includes('Just a moment...')));
+    assert.ok(statusResult.diagnosticDetails.some(d => d.includes('HTTP 403')));
+  });
+
+  await t.test('16. Trata iframe que aponta para tela de login sem afirmar que é player de vídeo', async () => {
+    // Caso observado no site Coempregos: iframe apontando para página de autenticação
+    const htmlWithLoginIframe = `
+      <html>
+        <head><title>Portal com Iframe de Acesso</title></head>
+        <body>
+          <iframe src="https://auth.coempregos.com.br/login?redirect=/area-restrita" title="Acesso à Conta"></iframe>
+        </body>
+      </html>
+    `;
+
+    const result = await extractMediaFromHtml(htmlWithLoginIframe, 'https://coempregos.com.br/vaga');
+    assert.strictEqual(result.sources.length, 0, 'Não deve afirmar que existe vídeo só porque há um iframe');
+    assert.strictEqual(result.detectedIframes.length, 1);
+    assert.strictEqual(result.detectedIframes[0].domain, 'auth.coempregos.com.br');
+    assert.strictEqual(result.detectedIframes[0].title, 'Acesso à Conta');
+
+    const statusResult = determineInspectionStatus({
+      sourcesCount: result.sources.length,
+      hasAccessibleDirectSource: false,
+      detectedDrm: false,
+      detectedProtection: false,
+      iframesCount: 1,
+      dynamicIndicatorsCount: 0,
+      firstIframeDomain: result.detectedIframes[0].domain
+    });
+
+    assert.strictEqual(statusResult.status, 'embedded_player_detected');
+    assert.ok(statusResult.diagnosticDetails.some(d => d.includes('Não é possível afirmar se existe um vídeo ativo')));
   });
 });
