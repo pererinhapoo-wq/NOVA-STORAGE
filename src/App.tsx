@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Header } from './components/common/Header';
 import { NotificationToast, ToastMessage } from './components/common/NotificationToast';
 import { StorageDashboard } from './components/dashboard/StorageDashboard';
@@ -11,10 +11,56 @@ import { StorageSettings } from './components/settings/StorageSettings';
 import { NovaStreamBridge } from './components/settings/NovaStreamBridge';
 import { LocalCatalogService } from './services/storage/localCatalogService';
 import { EpisodeFile, FilterState, Folder, StorageProviderConfig } from './types/storage';
-import { RotateCcw, ShieldCheck, Database, HardDrive } from 'lucide-react';
+import { RotateCcw } from 'lucide-react';
+
+type TabId = 'dashboard' | 'library' | 'folders' | 'settings' | 'bridge';
+const VALID_TABS: readonly TabId[] = ['dashboard', 'library', 'folders', 'settings', 'bridge'] as const;
+
+const STORAGE_TAB_KEY = 'nova_storage_active_tab_v1';
+const STORAGE_SCROLL_KEY = 'nova_storage_scroll_positions_v1';
+
+function isValidTab(value: unknown): value is TabId {
+  return typeof value === 'string' && (VALID_TABS as readonly string[]).includes(value);
+}
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'library' | 'folders' | 'settings' | 'bridge'>('dashboard');
+  // Inicialização segura com validação a partir do sessionStorage
+  const [activeTab, setActiveTabState] = useState<TabId>(() => {
+    try {
+      if (typeof window !== 'undefined' && window.sessionStorage) {
+        const savedTab = window.sessionStorage.getItem(STORAGE_TAB_KEY);
+        if (isValidTab(savedTab)) {
+          return savedTab;
+        }
+      }
+    } catch {
+      // Fallback seguro caso sessionStorage esteja bloqueado no navegador
+    }
+    return 'dashboard';
+  });
+
+  const isRestoringScrollRef = useRef(false);
+  const initialScrollRestoredRef = useRef(false);
+
+  // Transição de aba com persistência no sessionStorage e reset de rolagem para o topo
+  const handleTabChange = useCallback((newTab: TabId) => {
+    if (!isValidTab(newTab)) return;
+    setActiveTabState(newTab);
+
+    try {
+      if (typeof window !== 'undefined' && window.sessionStorage) {
+        window.sessionStorage.setItem(STORAGE_TAB_KEY, newTab);
+        // Ao alternar ativamente de aba, a intenção é ver o início da nova seção
+        const raw = window.sessionStorage.getItem(STORAGE_SCROLL_KEY);
+        const map = raw ? JSON.parse(raw) : {};
+        map[newTab] = 0;
+        window.sessionStorage.setItem(STORAGE_SCROLL_KEY, JSON.stringify(map));
+      }
+      window.scrollTo({ top: 0, behavior: 'instant' });
+    } catch {
+      // Ignore
+    }
+  }, []);
 
   const [folders, setFolders] = useState<Folder[]>([]);
   const [episodes, setEpisodes] = useState<EpisodeFile[]>([]);
@@ -67,6 +113,98 @@ export default function App() {
   useEffect(() => {
     refreshData();
   }, [refreshData]);
+
+  // Salvar a posição vertical de rolagem no sessionStorage para a aba ativa
+  useEffect(() => {
+    let scrollTimeout: number | undefined;
+
+    const saveCurrentScroll = () => {
+      if (isRestoringScrollRef.current) return;
+      try {
+        const currentY = window.scrollY || document.documentElement.scrollTop || 0;
+        const raw = window.sessionStorage.getItem(STORAGE_SCROLL_KEY);
+        const map = raw ? JSON.parse(raw) : {};
+        map[activeTab] = Math.max(0, currentY);
+        window.sessionStorage.setItem(STORAGE_SCROLL_KEY, JSON.stringify(map));
+      } catch {
+        // Ignore
+      }
+    };
+
+    const handleScroll = () => {
+      window.clearTimeout(scrollTimeout);
+      scrollTimeout = window.setTimeout(saveCurrentScroll, 100);
+    };
+
+    const handleBeforeUnload = () => {
+      saveCurrentScroll();
+    };
+
+    window.addEventListener('scroll', handleScroll, { passive: true });
+    window.addEventListener('beforeunload', handleBeforeUnload);
+
+    return () => {
+      window.clearTimeout(scrollTimeout);
+      window.removeEventListener('scroll', handleScroll);
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+    };
+  }, [activeTab]);
+
+  // Restaurar a posição vertical de rolagem APENAS no carregamento / recarregamento inicial
+  useEffect(() => {
+    if (initialScrollRestoredRef.current) return;
+
+    let targetY = 0;
+    try {
+      const raw = window.sessionStorage.getItem(STORAGE_SCROLL_KEY);
+      if (raw) {
+        const map = JSON.parse(raw);
+        if (typeof map[activeTab] === 'number' && Number.isFinite(map[activeTab]) && map[activeTab] > 0) {
+          targetY = map[activeTab];
+        }
+      }
+    } catch {
+      targetY = 0;
+    }
+
+    if (targetY === 0) {
+      initialScrollRestoredRef.current = true;
+      return;
+    }
+
+    isRestoringScrollRef.current = true;
+
+    let attempts = 0;
+    const maxAttempts = 20; // Aguarda renderização dos componentes por até ~350ms
+    let rafId: number;
+
+    const checkAndScroll = () => {
+      attempts++;
+      const currentScrollHeight = document.documentElement.scrollHeight;
+      const viewportHeight = window.innerHeight;
+
+      // Aguarda o DOM estar renderizado e expandido para acomodar a rolagem salva
+      if (currentScrollHeight >= targetY + viewportHeight || attempts >= maxAttempts) {
+        window.scrollTo({
+          top: targetY,
+          behavior: 'instant'
+        });
+        initialScrollRestoredRef.current = true;
+        requestAnimationFrame(() => {
+          isRestoringScrollRef.current = false;
+        });
+      } else {
+        rafId = requestAnimationFrame(checkAndScroll);
+      }
+    };
+
+    rafId = requestAnimationFrame(checkAndScroll);
+
+    return () => {
+      cancelAnimationFrame(rafId);
+      isRestoringScrollRef.current = false;
+    };
+  }, [activeTab]);
 
   // Handler: Add Episode
   const handleAddEpisode = (data: {
@@ -166,7 +304,7 @@ export default function App() {
   // Handler: Select folder from FolderExplorer
   const handleSelectFolder = (folderId: string) => {
     setFilterState((prev) => ({ ...prev, folderId }));
-    setActiveTab('library');
+    handleTabChange('library');
   };
 
   // Reset to default sample catalog
@@ -183,7 +321,7 @@ export default function App() {
       {/* Top Bar Header */}
       <Header
         activeTab={activeTab}
-        onTabChange={setActiveTab}
+        onTabChange={handleTabChange}
         onOpenAddModal={() => setIsAddModalOpen(true)}
       />
 
@@ -194,7 +332,7 @@ export default function App() {
             stats={stats}
             recentEpisodes={episodes}
             folders={folders}
-            onNavigateTab={setActiveTab}
+            onNavigateTab={handleTabChange}
             onSelectEpisode={setSelectedEpisode}
             onOpenAddModal={() => setIsAddModalOpen(true)}
             onOpenNewFolderModal={() => setIsNewFolderModalOpen(true)}

@@ -304,26 +304,103 @@ export class GoogleDriveStorageAdapter implements StorageProviderAdapter {
   }
 
   /**
+   * Known video file extensions
+   */
+  public static readonly VIDEO_EXTENSIONS = [
+    '.mp4', '.mkv', '.webm', '.avi', '.mov', '.m4v', '.flv', '.ts', '.wmv', '.3gp', '.ogv', '.mpg', '.mpeg'
+  ];
+
+  /**
+   * Known non-video extensions explicitly excluded (PDF, ISO, archives, documents, images, audio)
+   */
+  public static readonly NON_VIDEO_EXTENSIONS = [
+    '.pdf', '.iso', '.img', '.bin', '.zip', '.rar', '.7z', '.tar', '.gz', '.txt',
+    '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.exe', '.apk', '.dmg',
+    '.srt', '.vtt', '.ass', '.sub', '.nfo', '.mp3', '.flac', '.wav', '.aac', '.m4a', '.ogg'
+  ];
+
+  /**
+   * Determines if a file is a valid, recognized video file based on extension and MIME type.
+   * Explicitly excludes PDFs, ISOs, documents, and archives even if categorized loosely.
+   */
+  public static isVideoFile(name: string, mimeType?: string): boolean {
+    const nameLower = (name || '').toLowerCase().trim();
+    const mimeLower = (mimeType || '').toLowerCase().trim();
+
+    // 1. Explicit exclusion of known non-video extensions (e.g. .pdf, .iso, .zip, etc.)
+    for (const ext of GoogleDriveStorageAdapter.NON_VIDEO_EXTENSIONS) {
+      if (nameLower.endsWith(ext)) {
+        return false;
+      }
+    }
+
+    // 2. Explicit exclusion of non-video MIME types
+    if (
+      mimeLower.includes('pdf') ||
+      mimeLower.includes('iso') ||
+      mimeLower.startsWith('image/') ||
+      mimeLower.startsWith('audio/') ||
+      mimeLower.startsWith('text/') ||
+      mimeLower.includes('application/zip') ||
+      mimeLower.includes('application/x-zip') ||
+      mimeLower.includes('application/x-rar') ||
+      mimeLower.includes('application/x-7z') ||
+      mimeLower.includes('application/x-iso9660-image') ||
+      mimeLower.includes('application/x-raw-disk-image')
+    ) {
+      return false;
+    }
+
+    // 3. Explicit inclusion of video extensions
+    for (const ext of GoogleDriveStorageAdapter.VIDEO_EXTENSIONS) {
+      if (nameLower.endsWith(ext)) {
+        return true;
+      }
+    }
+
+    // 4. Video MIME types
+    if (mimeLower.startsWith('video/')) {
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
    * Helper: Infers format extension / codec container from name or MIME type.
    */
   public static inferFormat(name: string, mimeType?: string): string {
-    const nameLower = name.toLowerCase();
-    if (nameLower.endsWith('.mkv')) return 'MKV';
-    if (nameLower.endsWith('.mp4')) return 'MP4';
-    if (nameLower.endsWith('.webm')) return 'WEBM';
-    if (nameLower.endsWith('.avi')) return 'AVI';
-    if (nameLower.endsWith('.mov')) return 'MOV';
-    if (nameLower.endsWith('.ts')) return 'MPEG-TS';
+    const nameLower = (name || '').toLowerCase();
+    const mimeLower = (mimeType || '').toLowerCase();
 
-    if (mimeType) {
-      if (mimeType.includes('matroska') || mimeType.includes('x-matroska')) return 'MKV';
-      if (mimeType.includes('mp4')) return 'MP4';
-      if (mimeType.includes('webm')) return 'WEBM';
-      if (mimeType.includes('avi')) return 'AVI';
-      if (mimeType.includes('quicktime')) return 'MOV';
+    // Video formats
+    if (nameLower.endsWith('.mkv') || mimeLower.includes('matroska')) return 'MKV';
+    if (nameLower.endsWith('.mp4') || mimeLower === 'video/mp4') return 'MP4';
+    if (nameLower.endsWith('.webm') || mimeLower === 'video/webm') return 'WEBM';
+    if (nameLower.endsWith('.avi') || mimeLower.includes('x-msvideo') || mimeLower.includes('avi')) return 'AVI';
+    if (nameLower.endsWith('.mov') || mimeLower.includes('quicktime')) return 'MOV';
+    if (nameLower.endsWith('.m4v')) return 'M4V';
+    if (nameLower.endsWith('.ts') || mimeLower.includes('mp2t')) return 'MPEG-TS';
+    if (nameLower.endsWith('.flv') || mimeLower.includes('x-flv')) return 'FLV';
+    if (nameLower.endsWith('.wmv') || mimeLower.includes('ms-wmv')) return 'WMV';
+
+    // Non-video formats explicitly identified
+    if (nameLower.endsWith('.pdf') || mimeLower.includes('pdf')) return 'PDF';
+    if (nameLower.endsWith('.iso') || mimeLower.includes('iso')) return 'ISO';
+    if (nameLower.endsWith('.zip') || nameLower.endsWith('.rar') || nameLower.endsWith('.7z')) return 'ARQUIVO';
+
+    if (mimeLower.startsWith('video/')) {
+      return 'VÍDEO';
     }
 
-    return 'VÍDEO';
+    return 'OUTRO';
+  }
+
+  /**
+   * Helper: Checks if format has native browser HTML5 playback support
+   */
+  public static isNativePlayable(format: string): boolean {
+    return format === 'MP4' || format === 'WEBM';
   }
 
   /**
