@@ -30,7 +30,7 @@ import { StorageProviderConfig } from '../../types/storage';
 import { GoogleDriveStorageAdapter, DriveVideoItem } from '../../services/storage/providers/googleDriveAdapter';
 import { MegaStorageAdapter } from '../../services/storage/providers/megaAdapter';
 import { DriveVideoPlayerModal } from './DriveVideoPlayerModal';
-import { BunnyLinkTester } from './BunnyLinkTester';
+import { MuxVideoTester } from './MuxVideoTester';
 
 interface StorageSettingsProps {
   providers: StorageProviderConfig[];
@@ -1346,12 +1346,12 @@ export const StorageSettings: React.FC<StorageSettingsProps> = ({
         </div>
       </div>
 
-      {/* Testador de Links Bunny */}
+      {/* Testador de Vídeos Mux */}
       <div className="space-y-3">
         <h2 className="text-sm font-bold tracking-wide uppercase text-neutral-400 px-1">
-          Testador de Links Bunny
+          Testador de Vídeos Mux
         </h2>
-        <BunnyLinkTester onNotify={onNotify} />
+        <MuxVideoTester onNotify={onNotify} />
       </div>
 
       {/* Security Architecture Principles Card */}
