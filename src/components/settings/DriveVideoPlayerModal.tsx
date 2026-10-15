@@ -1,16 +1,13 @@
 import React, { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import {
   X,
   ExternalLink,
-  Film,
-  HardDrive,
   Clock,
   AlertTriangle,
   Shield,
-  Info,
-  Maximize2,
   RefreshCw,
-  CheckCircle2
+  AlertCircle
 } from 'lucide-react';
 import { DriveVideoItem, GoogleDriveStorageAdapter } from '../../services/storage/providers/googleDriveAdapter';
 
@@ -26,15 +23,24 @@ export const DriveVideoPlayerModal: React.FC<DriveVideoPlayerModalProps> = ({
   onClose
 }) => {
   const [isLoading, setIsLoading] = useState(true);
+  const [loadTimedOut, setLoadTimedOut] = useState(false);
   const [iframeKey, setIframeKey] = useState(0);
 
-  // Reset loading state when a new video is selected
+  // Reset loading state and set safety timeout when a video is selected or reloaded
   useEffect(() => {
-    if (video) {
+    if (video && isOpen) {
       setIsLoading(true);
-      setIframeKey((prev) => prev + 1);
+      setLoadTimedOut(false);
+
+      // Safety timeout: 5.0 seconds to prevent interface from staying stuck in the spinner
+      const timer = setTimeout(() => {
+        setIsLoading(false);
+        setLoadTimedOut(true);
+      }, 5000);
+
+      return () => clearTimeout(timer);
     }
-  }, [video?.id]);
+  }, [video?.id, isOpen, iframeKey]);
 
   // Handle ESC key to close modal
   useEffect(() => {
@@ -47,7 +53,18 @@ export const DriveVideoPlayerModal: React.FC<DriveVideoPlayerModalProps> = ({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isOpen, onClose]);
 
-  if (!isOpen || !video) return null;
+  // Prevent background scroll while modal is open
+  useEffect(() => {
+    if (isOpen) {
+      const originalOverflow = document.body.style.overflow;
+      document.body.style.overflow = 'hidden';
+      return () => {
+        document.body.style.overflow = originalOverflow;
+      };
+    }
+  }, [isOpen]);
+
+  if (!isOpen || !video || typeof document === 'undefined') return null;
 
   const formatBadge = GoogleDriveStorageAdapter.inferFormat(video.name, video.mimeType);
   const formattedSize = GoogleDriveStorageAdapter.formatBytes(video.sizeBytes);
@@ -65,15 +82,29 @@ export const DriveVideoPlayerModal: React.FC<DriveVideoPlayerModalProps> = ({
 
   const handleReloadIframe = () => {
     setIsLoading(true);
+    setLoadTimedOut(false);
     setIframeKey((prev) => prev + 1);
   };
 
-  return (
-    <div className="fixed inset-0 z-50 overflow-y-auto bg-neutral-950/85 backdrop-blur-md flex items-center justify-center p-3 sm:p-5">
-      <div
-        className="relative w-full max-w-4xl bg-neutral-900 border border-neutral-800 rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[92vh] animate-in fade-in zoom-in-95 duration-150"
-        onClick={(e) => e.stopPropagation()}
-      >
+  const handleIframeLoaded = () => {
+    setIsLoading(false);
+    setLoadTimedOut(false);
+  };
+
+  const modalContent = (
+    <div
+      className="fixed inset-0 z-50 overflow-y-auto bg-neutral-950/85 backdrop-blur-sm flex items-center justify-center p-3 sm:p-5"
+      onClick={(e) => {
+        // Fechar ao clicar no backdrop sem precisar de stopPropagation no card
+        if (e.target === e.currentTarget) {
+          onClose();
+        }
+      }}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="drive-modal-title"
+    >
+      <div className="relative w-full max-w-4xl bg-neutral-900 border border-neutral-800 rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[92vh] my-auto">
         {/* Modal Header */}
         <div className="flex items-start justify-between gap-4 p-4 sm:p-5 border-b border-neutral-800 bg-neutral-950/70">
           <div className="space-y-1.5 min-w-0">
@@ -101,20 +132,22 @@ export const DriveVideoPlayerModal: React.FC<DriveVideoPlayerModalProps> = ({
               )}
             </div>
 
-            <h2 className="text-base sm:text-lg font-bold text-white truncate" title={video.name}>
+            <h2 id="drive-modal-title" className="text-base sm:text-lg font-bold text-white truncate" title={video.name}>
               {video.name}
             </h2>
           </div>
 
           <div className="flex items-center gap-1 shrink-0">
             <button
+              type="button"
               onClick={handleReloadIframe}
               title="Recarregar player"
               className="p-1.5 text-neutral-400 hover:text-white rounded-lg hover:bg-neutral-800 transition-colors"
             >
-              <RefreshCw className="w-4 h-4" />
+              <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
             </button>
             <button
+              type="button"
               onClick={onClose}
               className="p-1.5 text-neutral-400 hover:text-white rounded-lg hover:bg-neutral-800 transition-colors"
               aria-label="Fechar modal"
@@ -144,9 +177,34 @@ export const DriveVideoPlayerModal: React.FC<DriveVideoPlayerModalProps> = ({
               className="w-full h-full border-0"
               allow="autoplay; encrypted-media; fullscreen"
               allowFullScreen
-              onLoad={() => setIsLoading(false)}
+              onLoad={handleIframeLoaded}
             />
           </div>
+
+          {/* Safety Timeout Notice when preview takes long or is blocked */}
+          {loadTimedOut && (
+            <div className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/25 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+              <div className="space-y-1">
+                <div className="flex items-center gap-2 font-semibold text-amber-300">
+                  <AlertCircle className="w-4 h-4 shrink-0" />
+                  <span>A pré-visualização pode estar demorando para carregar ou bloqueada pelo navegador</span>
+                </div>
+                <p className="text-neutral-400 leading-relaxed text-[11px]">
+                  O Google Drive pode exigir permissões/cookies em iframes ou estar processando o vídeo. Para assistir diretamente no Drive, utilize o botão ao lado.
+                </p>
+              </div>
+
+              <a
+                href={video.webViewLink}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-neutral-950 bg-amber-400 hover:bg-amber-300 rounded-lg transition-colors whitespace-nowrap shrink-0 self-start sm:self-auto shadow-sm"
+              >
+                <span>Abrir no Drive</span>
+                <ExternalLink className="w-3.5 h-3.5" />
+              </a>
+            </div>
+          )}
 
           {/* Quick Action: Open directly in Google Drive */}
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 rounded-xl bg-neutral-950/90 border border-neutral-800">
@@ -176,13 +234,13 @@ export const DriveVideoPlayerModal: React.FC<DriveVideoPlayerModalProps> = ({
             </div>
             <div className="text-neutral-400 space-y-1.5 leading-relaxed text-[11px]">
               <p>
-                • <strong className="text-neutral-200">Compatibilidade de Formatos:</strong> O player web do Google Drive suporta nativamente formatos comuns como <strong className="text-white">MP4</strong> e <strong className="text-white">WebM</strong> (codec H.264/AAC). Contêineres de alta fidelidade como <strong className="text-white">MKV</strong> {isMkvOrHeavyFormat && <span className="text-amber-400 font-semibold">(detectado neste arquivo)</span>} ou codecs de áudio avançados (FLAC, AC3, DTS) podem exigir processamento de transcodificação no Google Drive ou apresentar mensagem de "Não é possível visualizar o arquivo".
+                • <strong className="text-neutral-200">Compatibilidade de Formatos:</strong> O player web do Google Drive suporta nativamente formatos comuns como <strong className="text-white">MP4</strong> e <strong className="text-white">WebM</strong> (codec H.264/AAC). Contêineres de alta fidelidade como <strong className="text-white">MKV</strong> {isMkvOrHeavyFormat && <span className="text-amber-400 font-semibold">(detectado neste arquivo)</span>} ou codecs de áudio avançados (FLAC, AC3, DTS) podem exigir processamento de transcodificação no Google Drive ou apresentar mensagem de &quot;Não é possível visualizar o arquivo&quot;.
               </p>
               <p>
                 • <strong className="text-neutral-200">Sem Download via Vercel:</strong> Esta aplicação não realiza download ou retransmissão de arquivos pesados pelo servidor serverless da Vercel. A reprodução ocorre de forma descentralizada e segura diretamente entre o cliente e o Google Drive.
               </p>
               <p>
-                • <strong className="text-neutral-200">Cookies de Terceiros e Permissões:</strong> Se você estiver navegando em modo anônimo ou se seu navegador bloquear cookies de terceiros em iframes, o Google Drive pode exibir tela de login ou erro. Basta utilizar o botão <span className="text-cyan-400">"Abrir no Google Drive"</span> acima.
+                • <strong className="text-neutral-200">Cookies de Terceiros e Permissões:</strong> Se você estiver navegando em modo anônimo ou se seu navegador bloquear cookies de terceiros em iframes, o Google Drive pode exibir tela de login ou erro. Basta utilizar o botão <span className="text-cyan-400">&quot;Abrir no Google Drive&quot;</span> acima.
               </p>
             </div>
           </div>
@@ -227,6 +285,7 @@ export const DriveVideoPlayerModal: React.FC<DriveVideoPlayerModalProps> = ({
           </div>
 
           <button
+            type="button"
             onClick={onClose}
             className="px-4 py-2 text-xs font-semibold text-neutral-950 bg-neutral-200 hover:bg-white rounded-lg transition-colors"
           >
@@ -236,4 +295,6 @@ export const DriveVideoPlayerModal: React.FC<DriveVideoPlayerModalProps> = ({
       </div>
     </div>
   );
+
+  return createPortal(modalContent, document.body);
 };
