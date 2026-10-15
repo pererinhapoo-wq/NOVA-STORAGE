@@ -142,8 +142,11 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
   };
 
   const handleApplyPreset = (url: string) => {
-    setInputUrl(url);
-    handleClear();
+    destroyHls();
+    setInspectionResult(null);
+    setSelectedSourceIndex(0);
+    setPlaybackState('idle');
+    setPlaybackErrorDetail(null);
     setInputUrl(url);
   };
 
@@ -331,23 +334,24 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
         </div>
 
         {/* Presets de Demonstração Autorizada */}
-        <div className="flex flex-wrap items-center gap-1.5 pt-1 text-[11px] text-neutral-500">
-          <span className="flex items-center gap-1">
-            <Sparkles className="w-3 h-3 text-cyan-400" />
-            Exemplos autorizados para teste:
+        <div className="flex flex-wrap items-center gap-2 pt-1 text-xs text-neutral-400">
+          <span className="flex items-center gap-1.5 text-neutral-400 text-xs py-1">
+            <Sparkles className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+            <span>Exemplos autorizados para teste:</span>
           </span>
           <button
             type="button"
             onClick={() => handleApplyPreset(SAMPLE_HLS_URL)}
-            className="text-neutral-400 hover:text-cyan-300 underline underline-offset-2 transition-colors font-mono"
+            className="px-2.5 py-1 text-xs font-mono text-cyan-400 hover:text-cyan-300 bg-neutral-900 hover:bg-neutral-800 border border-neutral-800 hover:border-cyan-500/40 rounded-md transition-colors cursor-pointer touch-manipulation select-none active:scale-95"
+            aria-label="Preencher com exemplo de stream HLS aberto"
           >
             Stream HLS Aberto (.m3u8)
           </button>
-          <span>·</span>
           <button
             type="button"
             onClick={() => handleApplyPreset(SAMPLE_MP4_URL)}
-            className="text-neutral-400 hover:text-cyan-300 underline underline-offset-2 transition-colors font-mono"
+            className="px-2.5 py-1 text-xs font-mono text-cyan-400 hover:text-cyan-300 bg-neutral-900 hover:bg-neutral-800 border border-neutral-800 hover:border-cyan-500/40 rounded-md transition-colors cursor-pointer touch-manipulation select-none active:scale-95"
+            aria-label="Preencher com exemplo de arquivo MP4 aberto"
           >
             Arquivo MP4 Aberto
           </button>
