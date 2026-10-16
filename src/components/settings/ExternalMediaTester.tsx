@@ -19,14 +19,25 @@ import {
   Radio,
   FileVideo,
   Layers,
-  ArrowRight
+  ArrowRight,
+  Bookmark,
+  Smartphone,
+  ChevronDown,
+  ChevronUp,
+  Terminal
 } from 'lucide-react';
 import Hls from 'hls.js';
 import {
   ExternalMediaService,
   PageInspectionResult,
-  ExtractedMediaSource
+  ExtractedMediaSource,
+  evaluateMediaSourceValidation,
+  MediaSourceValidationEvaluation
 } from '../../services/storage/externalMediaService';
+import {
+  BOOKMARKLET_MINIFIED_CODE,
+  BRAVE_BOOKMARKLET_STEPS
+} from '../../services/storage/bookmarkletSnippet';
 
 interface ExternalMediaTesterProps {
   onNotify?: (title: string, message?: string, type?: 'success' | 'info' | 'error') => void;
@@ -46,7 +57,32 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
   const [selectedSourceIndex, setSelectedSourceIndex] = useState<number>(0);
   const [playbackState, setPlaybackState] = useState<PlaybackState>('idle');
   const [playbackErrorDetail, setPlaybackErrorDetail] = useState<string | null>(null);
+  const [browserErrorCode, setBrowserErrorCode] = useState<number | null>(null);
   const [copiedStream, setCopiedStream] = useState(false);
+  const [showBookmarkletGuide, setShowBookmarkletGuide] = useState(false);
+  const [copiedBookmarklet, setCopiedBookmarklet] = useState(false);
+
+  const handleCopyBookmarklet = () => {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(BOOKMARKLET_MINIFIED_CODE);
+    } else {
+      const input = document.createElement('textarea');
+      input.value = BOOKMARKLET_MINIFIED_CODE;
+      document.body.appendChild(input);
+      input.select();
+      document.execCommand('copy');
+      input.remove();
+    }
+    setCopiedBookmarklet(true);
+    setTimeout(() => setCopiedBookmarklet(false), 2500);
+    if (onNotify) {
+      onNotify(
+        'Bookmarklet Copiado!',
+        'Cole no campo URL do seu favorito no Brave para Android.',
+        'success'
+      );
+    }
+  };
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const hlsRef = useRef<Hls | null>(null);
@@ -71,6 +107,7 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
     setSelectedSourceIndex(0);
     setPlaybackState('idle');
     setPlaybackErrorDetail(null);
+    setBrowserErrorCode(null);
   };
 
   const handleInspect = async () => {
@@ -88,6 +125,7 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
     setSelectedSourceIndex(0);
     setPlaybackState('idle');
     setPlaybackErrorDetail(null);
+    setBrowserErrorCode(null);
 
     try {
       const response = await ExternalMediaService.inspectPage(trimmed);
@@ -113,16 +151,16 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
         } else if (diag.status === 'embedded_player_detected') {
           if (onNotify) {
             onNotify(
-              'Player Incorporado (iframe)',
-              `Identificado(s) ${response.result.detectedIframes?.length || 0} iframe(s). Não equivale a fonte direta de vídeo.`,
+              'Provável Player Incorporado',
+              `Identificado(s) ${response.result.detectedIframes?.length || 0} iframe(s) com características de player. Não equivale a link direto HLS/MP4.`,
               'info'
             );
           }
         } else if (diag.status === 'dynamic_loading_detected') {
           if (onNotify) {
             onNotify(
-              'Carregamento Dinâmico',
-              'A página referencia scripts de reprodução ou configurações dinâmicas de mídia.',
+              'Carregamento Dinâmico de Mídia',
+              'O fluxo de vídeo é requisitado sob demanda via scripts no navegador. Não há URLs diretas no HTML estático.',
               'info'
             );
           }
@@ -136,7 +174,7 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
           }
         } else {
           if (onNotify) {
-            onNotify('Nenhuma Fonte Aberta', 'Não foram encontradas tags de vídeo, iframes ou scripts dinâmicos.', 'info');
+            onNotify('Nenhuma Fonte Aberta', 'Não foram encontradas tags de vídeo nem players abertos no HTML inicial.', 'info');
           }
         }
       } else {
@@ -172,6 +210,7 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
     setSelectedSourceIndex(0);
     setPlaybackState('idle');
     setPlaybackErrorDetail(null);
+    setBrowserErrorCode(null);
     setInputUrl(url);
   };
 
@@ -179,6 +218,15 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
     inspectionResult?.sourcesFound && inspectionResult.sourcesFound.length > 0
       ? inspectionResult.sourcesFound[selectedSourceIndex]
       : undefined;
+
+  const validationEvaluation: MediaSourceValidationEvaluation = React.useMemo(() => {
+    return evaluateMediaSourceValidation({
+      source: activeSource,
+      playbackState,
+      playbackErrorDetail,
+      browserErrorCode
+    });
+  }, [activeSource, playbackState, playbackErrorDetail, browserErrorCode]);
 
   const handleCopyStream = () => {
     if (!activeSource?.url) return;
@@ -231,15 +279,20 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
           if (data.fatal) {
             setPlaybackState('error');
             setPlaybackErrorDetail(msg);
+            setBrowserErrorCode(code === 403 ? 403 : 2);
             hls.destroy();
           }
         });
       } else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
         videoEl.src = mediaUrl;
-        const handleLoaded = () => setPlaybackState('canplay');
+        const handleLoaded = () => {
+          setPlaybackState('canplay');
+          setBrowserErrorCode(null);
+        };
         const handleError = () => {
           setPlaybackState('error');
           setPlaybackErrorDetail('Falha na reprodução HLS nativa pelo navegador (possível bloqueio de CORS).');
+          setBrowserErrorCode(2);
         };
 
         videoEl.addEventListener('loadedmetadata', handleLoaded);
@@ -252,6 +305,7 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
       } else {
         setPlaybackState('error');
         setPlaybackErrorDetail('Este navegador não oferece suporte a HLS (.m3u8).');
+        setBrowserErrorCode(4);
       }
     } else {
       // Vídeo direto MP4 / WebM
@@ -265,11 +319,13 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
       const handleCanPlay = () => {
         setPlaybackState('canplay');
         setPlaybackErrorDetail(null);
+        setBrowserErrorCode(null);
       };
 
       const handlePlaying = () => {
         setPlaybackState('playing');
         setPlaybackErrorDetail(null);
+        setBrowserErrorCode(null);
       };
 
       const handleWaiting = () => {
@@ -278,7 +334,8 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
 
       const handleVideoErr = () => {
         const error = videoEl.error;
-        const code = error?.code;
+        const code = error?.code || null;
+        setBrowserErrorCode(code);
         const browserMsg = error?.message;
 
         let codeDesc = '';
@@ -448,6 +505,122 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
             MP4 com Range 206 (CC0)
           </button>
         </div>
+
+        {/* Card Expansível: Bookmarklet Detector para Celular (Brave Android) */}
+        <div className="rounded-xl border border-neutral-800/90 bg-neutral-950/70 overflow-hidden transition-all">
+          <div
+            onClick={() => setShowBookmarkletGuide(!showBookmarkletGuide)}
+            className="p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 cursor-pointer hover:bg-neutral-900/60 transition-colors"
+          >
+            <div className="flex items-start gap-2.5">
+              <div className="w-8 h-8 rounded-lg bg-cyan-950/50 border border-cyan-800/40 flex items-center justify-center text-cyan-400 shrink-0 mt-0.5">
+                <Smartphone className="w-4 h-4" />
+              </div>
+              <div className="space-y-0.5">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs font-bold text-white tracking-wide">
+                    Detector de Vídeo no Celular (Brave Android)
+                  </span>
+                  <span className="text-[10px] font-mono text-cyan-300 bg-cyan-950/60 px-2 py-0.5 rounded border border-cyan-800/50">
+                    BOOKMARKLET FAVORITO
+                  </span>
+                </div>
+                <p className="text-[11px] text-neutral-400 leading-relaxed">
+                  Capture a URL (.m3u8/.mp4) navegando diretamente no Brave e colando no testador acima, sem baixar o vídeo.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 self-end sm:self-center shrink-0">
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleCopyBookmarklet();
+                }}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-neutral-950 bg-cyan-400 hover:bg-cyan-300 rounded-lg transition-colors shadow-sm cursor-pointer"
+                title="Copiar código do bookmarklet para criar o favorito no Brave"
+              >
+                {copiedBookmarklet ? <Check className="w-3.5 h-3.5 text-neutral-950" /> : <Copy className="w-3.5 h-3.5" />}
+                <span>{copiedBookmarklet ? 'Código Copiado!' : 'Copiar Bookmarklet'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowBookmarkletGuide(!showBookmarkletGuide)}
+                className="p-1.5 rounded-lg text-neutral-400 hover:text-white hover:bg-neutral-800/60 transition-colors"
+                title={showBookmarkletGuide ? 'Ocultar instruções' : 'Ver instruções'}
+                aria-label={showBookmarkletGuide ? 'Ocultar instruções' : 'Ver instruções'}
+              >
+                {showBookmarkletGuide ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+              </button>
+            </div>
+          </div>
+
+          {showBookmarkletGuide && (
+            <div className="p-4 border-t border-neutral-800/80 bg-neutral-900/30 space-y-4">
+              <div className="flex items-center gap-2 text-xs font-semibold text-neutral-200">
+                <Bookmark className="w-3.5 h-3.5 text-cyan-400" />
+                <span>Como configurar e usar no Brave para Android:</span>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {BRAVE_BOOKMARKLET_STEPS.map((step) => (
+                  <div key={step.stepNumber} className="p-3 rounded-lg bg-neutral-950/80 border border-neutral-800 space-y-1">
+                    <div className="flex items-center gap-2">
+                      <span className="w-5 h-5 rounded-full bg-cyan-950 border border-cyan-800 text-cyan-300 text-[11px] font-bold font-mono flex items-center justify-center shrink-0">
+                        {step.stepNumber}
+                      </span>
+                      <strong className="text-xs text-neutral-200">{step.title}</strong>
+                    </div>
+                    <p className="text-[11px] text-neutral-300 leading-relaxed pl-7">
+                      {step.instruction}
+                    </p>
+                    <p className="text-[10px] text-neutral-500 font-mono pl-7">
+                      {step.detail}
+                    </p>
+                  </div>
+                ))}
+              </div>
+
+              {/* Caixa com o código minificado */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-[11px] font-semibold text-neutral-300 flex items-center gap-1.5">
+                    <Terminal className="w-3.5 h-3.5 text-cyan-400" />
+                    <span>Código do Bookmarklet JavaScript:</span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleCopyBookmarklet}
+                    className="text-[11px] text-cyan-400 hover:text-cyan-300 flex items-center gap-1"
+                  >
+                    {copiedBookmarklet ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+                    <span>{copiedBookmarklet ? 'Copiado!' : 'Copiar'}</span>
+                  </button>
+                </div>
+                <div className="relative">
+                  <textarea
+                    readOnly
+                    rows={2}
+                    value={BOOKMARKLET_MINIFIED_CODE}
+                    className="w-full bg-neutral-950 border border-neutral-800 rounded-lg p-2.5 font-mono text-[10px] text-neutral-400 select-all focus:outline-none focus:border-cyan-500 resize-none"
+                    onClick={(e) => (e.target as HTMLTextAreaElement).select()}
+                  />
+                </div>
+              </div>
+
+              {/* Princípios de Segurança e Limitação Técnica de CSP */}
+              <div className="p-3 rounded-lg bg-neutral-950/70 border border-neutral-800 text-[11px] text-neutral-400 space-y-1.5 leading-relaxed">
+                <p>
+                  🔒 <strong>Privacidade e Isolamento:</strong> O script roda apenas na memória temporária da aba atual do seu navegador. Ele busca URLs com <code>.m3u8</code> ou <code>.mp4</code> nas tags HTML e na API <code>performance.getEntriesByType('resource')</code>. <strong>Não coleta cookies, senhas, tokens de autorização nem dados privados.</strong>
+                </p>
+                <p className="text-[10px] text-neutral-500">
+                  ⚠️ <strong>Caso o Brave bloqueie a execução:</strong> Alguns sites possuem cabeçalho <code>Content-Security-Policy: script-src</code> restrito que impede a execução de scripts via favoritos da barra de endereços. Nesses casos, a alternativa é inspecionar a rede do navegador ou inserir a URL direta fornecida pelo site.
+                </p>
+              </div>
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Painel com Diagnóstico e Estágios de Confirmação */}
@@ -520,26 +693,74 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
             </div>
           </div>
 
-          {/* Barra de Estágios: Fonte Encontrada -> Fonte Acessível -> Reprodução Confirmada */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-            {/* Estágio 1: Identificação de Fonte / Elemento */}
-            <div
-              className={`p-3 rounded-lg border flex items-start gap-2.5 ${
-                inspectionResult.sourcesFound.length > 0
-                  ? 'bg-emerald-950/20 border-emerald-800/50'
-                  : inspectionResult.diagnostics.status === 'challenge_or_interstitial_detected'
-                  ? 'bg-amber-950/20 border-amber-800/50'
-                  : (inspectionResult.detectedIframes?.length || 0) > 0
-                  ? 'bg-indigo-950/20 border-indigo-800/40'
-                  : (inspectionResult.dynamicMediaIndicators?.length || 0) > 0
-                  ? 'bg-amber-950/20 border-amber-800/40'
-                  : 'bg-neutral-950/60 border-neutral-800'
-              }`}
-            >
+          {/* Validação da Fonte Selecionada - Exibe com Precisão o Estado Atual (1 dos 7 Estados) */}
+          {activeSource ? (
+            <div className={`p-3.5 sm:p-4 rounded-xl border space-y-2.5 transition-all ${validationEvaluation.badgeClass}`}>
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                <div className="flex items-start gap-2.5 min-w-0">
+                  <div className="w-8 h-8 rounded-lg bg-black/40 border border-white/10 flex items-center justify-center shrink-0 mt-0.5">
+                    {validationEvaluation.state === 'playback_confirmed' ? (
+                      <Play className="w-4 h-4 text-emerald-400 fill-current" />
+                    ) : validationEvaluation.state === 'server_accessible' ? (
+                      <CheckCircle2 className="w-4 h-4 text-cyan-400" />
+                    ) : validationEvaluation.state === 'temporary_or_expired' ? (
+                      <AlertTriangle className="w-4 h-4 text-amber-400" />
+                    ) : validationEvaluation.state === 'access_denied' ? (
+                      <AlertCircle className="w-4 h-4 text-rose-400" />
+                    ) : validationEvaluation.state === 'playback_failed' ? (
+                      <AlertCircle className="w-4 h-4 text-rose-400" />
+                    ) : validationEvaluation.state === 'inconclusive' ? (
+                      <Info className="w-4 h-4 text-neutral-400" />
+                    ) : (
+                      <Radio className="w-4 h-4 text-neutral-400" />
+                    )}
+                  </div>
+                  <div className="space-y-0.5 min-w-0">
+                    <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
+                      <span className="text-xs font-bold uppercase tracking-wider text-white">
+                        {validationEvaluation.stateLabel}
+                      </span>
+                      {validationEvaluation.isTemporary && (
+                        <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-amber-950 border border-amber-800 text-amber-300">
+                          LINK TEMPORÁRIO
+                        </span>
+                      )}
+                      <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-black/40 border border-white/10 text-neutral-300">
+                        {activeSource.format}
+                      </span>
+                    </div>
+                    <p className="text-xs text-neutral-300 leading-snug">
+                      {validationEvaluation.summaryMessage}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="shrink-0 self-start sm:self-center">
+                  <span className="text-[10px] font-mono font-medium px-2 py-0.5 rounded bg-black/40 border border-white/10 text-neutral-400">
+                    ESTADO ATUAL
+                  </span>
+                </div>
+              </div>
+
+              {/* Lista de Evidências Concretas do Diagnóstico */}
+              {validationEvaluation.evidence.length > 0 && (
+                <div className="pt-2 border-t border-white/10 space-y-1">
+                  <span className="text-[10px] uppercase text-neutral-400 font-mono block">
+                    Evidências Técnicas Registradas:
+                  </span>
+                  <ul className="list-disc list-inside space-y-0.5 text-[11px] text-neutral-300">
+                    {validationEvaluation.evidence.map((ev, i) => (
+                      <li key={i}>{ev}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          ) : (
+            /* Sem fontes de mídia diretas na página analisada */
+            <div className="p-3.5 rounded-xl border bg-neutral-950/60 border-neutral-800 flex items-start gap-2.5">
               <div className="mt-0.5">
-                {inspectionResult.sourcesFound.length > 0 ? (
-                  <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                ) : inspectionResult.diagnostics.status === 'challenge_or_interstitial_detected' ? (
+                {inspectionResult.diagnostics.status === 'challenge_or_interstitial_detected' ? (
                   <ShieldCheck className="w-4 h-4 text-amber-400" />
                 ) : (inspectionResult.detectedIframes?.length || 0) > 0 ? (
                   <Layers className="w-4 h-4 text-indigo-400" />
@@ -551,131 +772,20 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
               </div>
               <div className="min-w-0">
                 <span className="text-[11px] font-bold uppercase tracking-wider block text-neutral-200">
-                  1. Detecção no HTML
-                </span>
-                <span className="text-xs text-neutral-400 block truncate">
-                  {inspectionResult.sourcesFound.length > 0
-                    ? `${inspectionResult.sourcesFound.length} fonte(s) direta(s) aberta(s)`
-                    : inspectionResult.diagnostics.status === 'challenge_or_interstitial_detected'
-                    ? `Página intermediária (${inspectionResult.interstitialChallenge?.provider || 'Proteção'})`
+                  {inspectionResult.diagnostics.status === 'challenge_or_interstitial_detected'
+                    ? 'Acesso Interceptado por Desafio'
                     : (inspectionResult.detectedIframes?.length || 0) > 0
-                    ? `${inspectionResult.detectedIframes?.length} iframe(s) incorporado(s)`
+                    ? 'Player Incorporado (iframe) Detectado'
                     : (inspectionResult.dynamicMediaIndicators?.length || 0) > 0
-                    ? `${inspectionResult.dynamicMediaIndicators?.length} script(s) de player dinâmico`
-                    : 'Nenhum elemento de vídeo'}
+                    ? 'Carregamento Dinâmico via Script'
+                    : 'Nenhuma Fonte Aberta Encontrada'}
+                </span>
+                <span className="text-xs text-neutral-400 block mt-0.5">
+                  {inspectionResult.diagnostics.summaryMessage}
                 </span>
               </div>
             </div>
-
-            {/* Estágio 2: Fonte Acessível (CORS / HTTP / Range) */}
-            {(() => {
-              const isChecked = activeSource && activeSource.accessible !== null && activeSource.accessible !== undefined;
-              const isAccessible = activeSource?.accessible === true;
-              const isDenied = activeSource?.accessible === false;
-              const isCors = activeSource?.corsSupported === true;
-              const statusCode = activeSource?.statusCode;
-
-              let cardBg = 'bg-neutral-950/60 border-neutral-800';
-              let icon = <AlertCircle className="w-4 h-4 text-neutral-500" />;
-              let title = '2. Fonte Acessível';
-              let subtitle = 'Aguardando verificação';
-
-              if (inspectionResult.diagnostics.status === 'challenge_or_interstitial_detected') {
-                cardBg = 'bg-amber-950/20 border-amber-800/40';
-                icon = <AlertCircle className="w-4 h-4 text-amber-400" />;
-                subtitle = `Acesso interceptado (${inspectionResult.diagnostics.httpStatusCode ? `HTTP ${inspectionResult.diagnostics.httpStatusCode}` : 'Desafio'})`;
-              } else if (inspectionResult.sourcesFound.length === 0) {
-                cardBg = 'bg-neutral-950/40 border-neutral-800/60';
-                icon = <AlertCircle className="w-4 h-4 text-neutral-600" />;
-                subtitle = (inspectionResult.detectedIframes?.length || 0) > 0
-                  ? 'Iframe isolado (não acessado por segurança)'
-                  : (inspectionResult.dynamicMediaIndicators?.length || 0) > 0
-                  ? 'Stream solicitado em tempo de execução'
-                  : 'Sem fonte direta para testar';
-              } else if (!isChecked) {
-                cardBg = 'bg-neutral-950/60 border-neutral-800';
-                icon = <AlertCircle className="w-4 h-4 text-neutral-500" />;
-                subtitle = 'Aguardando verificação de rede';
-              } else if (isAccessible) {
-                if (isCors) {
-                  cardBg = 'bg-emerald-950/20 border-emerald-800/50';
-                  icon = <CheckCircle2 className="w-4 h-4 text-emerald-400" />;
-                  subtitle = `HTTP ${statusCode || 200} · CORS Ativo (*) ${activeSource.supportsRange ? '· Range 206' : ''}`;
-                } else {
-                  cardBg = 'bg-amber-950/20 border-amber-800/50';
-                  icon = <AlertTriangle className="w-4 h-4 text-amber-400" />;
-                  subtitle = `HTTP ${statusCode || 200} · Sem CORS (Pode falhar no player)`;
-                }
-              } else if (isDenied) {
-                cardBg = 'bg-rose-950/25 border-rose-800/60';
-                icon = <AlertCircle className="w-4 h-4 text-rose-400" />;
-                subtitle = statusCode === 403
-                  ? 'Acesso Negado (HTTP 403 Forbidden)'
-                  : statusCode === 404
-                  ? 'Não Encontrado (HTTP 404 Not Found)'
-                  : `Inacessível (HTTP ${statusCode || 'Erro'})`;
-              }
-
-              return (
-                <div className={`p-3 rounded-lg border flex items-start gap-2.5 ${cardBg}`}>
-                  <div className="mt-0.5">{icon}</div>
-                  <div className="min-w-0">
-                    <span className="text-[11px] font-bold uppercase tracking-wider block text-neutral-200">
-                      {title}
-                    </span>
-                    <span className="text-xs text-neutral-400 block truncate" title={subtitle}>
-                      {subtitle}
-                    </span>
-                  </div>
-                </div>
-              );
-            })()}
-
-            {/* Estágio 3: Reprodução Confirmada */}
-            <div
-              className={`p-3 rounded-lg border flex items-start gap-2.5 ${
-                playbackState === 'playing'
-                  ? 'bg-emerald-950/30 border-emerald-500/60'
-                  : playbackState === 'canplay'
-                  ? 'bg-cyan-950/30 border-cyan-500/50'
-                  : playbackState === 'error'
-                  ? 'bg-rose-950/30 border-rose-800/60'
-                  : 'bg-neutral-950/60 border-neutral-800'
-              }`}
-            >
-              <div className="mt-0.5">
-                {playbackState === 'playing' ? (
-                  <Play className="w-4 h-4 text-emerald-400 fill-current" />
-                ) : playbackState === 'canplay' ? (
-                  <Radio className="w-4 h-4 text-cyan-400 animate-pulse" />
-                ) : playbackState === 'error' ? (
-                  <AlertCircle className="w-4 h-4 text-rose-400" />
-                ) : (
-                  <AlertCircle className="w-4 h-4 text-neutral-500" />
-                )}
-              </div>
-              <div className="min-w-0">
-                <span className="text-[11px] font-bold uppercase tracking-wider block text-neutral-200">
-                  3. Reprodução Confirmada
-                </span>
-                <span className="text-xs text-neutral-400 block truncate">
-                  {playbackState === 'playing'
-                    ? 'Decodificação e Streaming Ativos'
-                    : playbackState === 'canplay'
-                    ? 'Buffer Pronto para Iniciar'
-                    : playbackState === 'connecting'
-                    ? 'Bufferizando Fragmentos...'
-                    : playbackState === 'error'
-                    ? 'Falha na Reprodução'
-                    : inspectionResult.diagnostics.status === 'challenge_or_interstitial_detected'
-                    ? 'Aguardando página com player'
-                    : inspectionResult.sourcesFound.length === 0
-                    ? 'Nenhuma mídia direta para reproduzir'
-                    : 'Aguardando Início do Player'}
-                </span>
-              </div>
-            </div>
-          </div>
+          )}
 
           {/* Card Detalhado de Página Intermediária ou Desafio de Proteção */}
           {inspectionResult.interstitialChallenge?.detected && (
@@ -749,7 +859,11 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
           )}
 
           {/* Card Detalhado de Players Incorporados (iframes) */}
-          {inspectionResult.detectedIframes && inspectionResult.detectedIframes.length > 0 && (
+          {inspectionResult.detectedIframes && inspectionResult.detectedIframes.length > 0 && (() => {
+            const probableCount = inspectionResult.detectedIframes.filter(i => i.classification === 'probable_player').length;
+            const utilityCount = inspectionResult.detectedIframes.filter(i => i.classification === 'utility_or_service').length;
+
+            return (
             <div className="p-4 rounded-xl bg-indigo-950/20 border border-indigo-800/40 space-y-3">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                 <div className="flex items-center gap-2">
@@ -758,38 +872,59 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
                   </div>
                   <div>
                     <h4 className="text-xs font-bold text-indigo-200 uppercase tracking-wide">
-                      Player Incorporado (iframe) Identificado ({inspectionResult.detectedIframes.length})
+                      {probableCount > 0
+                        ? `Provável Player Incorporado (iframe) Detectado (${probableCount})`
+                        : utilityCount > 0
+                        ? `Iframe(s) Utilitário(s) Detectado(s) (${utilityCount})`
+                        : `Iframe(s) com Finalidade Não Confirmada (${inspectionResult.detectedIframes.length})`}
                     </h4>
                     <span className="text-[11px] text-neutral-400">
-                      Elemento(s) &lt;iframe&gt; detectado(s) no HTML da página
+                      {probableCount > 0
+                        ? `${inspectionResult.detectedIframes.length} frame(s) detectado(s), com indícios de player de vídeo`
+                        : `${inspectionResult.detectedIframes.length} frame(s) detectado(s), sem evidências de reprodução de vídeo`}
                     </span>
                   </div>
                 </div>
                 <span className="text-[10px] font-mono font-medium px-2 py-0.5 rounded bg-indigo-950 border border-indigo-800/60 text-indigo-300 self-start sm:self-auto">
-                  FRAME ISOLADO · NÃO AFIRMA VÍDEO
+                  FRAME ISOLADO · NÃO AFIRMA VÍDEO SEM EVIDÊNCIAS
                 </span>
               </div>
 
               <div className="p-2.5 rounded-lg bg-neutral-950/60 border border-neutral-800/70 text-xs text-neutral-300 space-y-1 leading-relaxed">
                 <p>
-                  <strong>Diretriz de Conformidade & Segurança:</strong> A presença de um elemento <code className="text-indigo-300 font-mono">&lt;iframe&gt;</code> indica que a página utiliza um frame encapsulado de terceiro. <strong>Não é possível afirmar que existe um vídeo ativo apenas por ter sido encontrado um iframe.</strong>
+                  <strong>Diretriz de Conformidade & Segurança:</strong> A presença de um elemento <code className="text-indigo-300 font-mono">&lt;iframe&gt;</code> indica um frame encapsulado. <strong>Não é possível afirmar que existe um vídeo ativo apenas pela presença de um iframe.</strong> Iframes utilitários (como chats de atendimento, telas de login ou anúncios) são diferenciados de players de streaming.
                 </p>
                 <p className="text-[11px] text-neutral-400">
-                  Por razões de segurança, proteção contra SSRF e a política de mesma origem (Same-Origin Policy), o NOVA STORAGE não tenta acessar o conteúdo interno de iframes de outros domínios, nem contornar restrições de acesso.
+                  Por motivos de segurança (proteção SSRF e Same-Origin Policy), o NOVA STORAGE não tenta acessar o conteúdo interno de iframes de outros domínios nem contornar restrições de acesso.
                 </p>
               </div>
 
               <div className="space-y-2">
                 <span className="text-[11px] font-semibold text-neutral-300 block">
-                  Domínio(s) de Origem Registrado(s):
+                  Classificação e Domínio(s) de Origem Registrado(s):
                 </span>
                 <div className="divide-y divide-neutral-800/60 rounded-lg border border-neutral-800/80 bg-neutral-950/80 overflow-hidden">
-                  {inspectionResult.detectedIframes.map((iframe, idx) => (
-                    <div key={`${iframe.url}-${idx}`} className="p-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
-                      <div className="min-w-0 flex-1">
+                  {inspectionResult.detectedIframes.map((iframe, idx) => {
+                    const isProbable = iframe.classification === 'probable_player';
+                    const isUtility = iframe.classification === 'utility_or_service';
+
+                    return (
+                    <div key={`${iframe.url}-${idx}`} className="p-2.5 flex flex-col sm:flex-row sm:items-start justify-between gap-2 text-xs">
+                      <div className="min-w-0 flex-1 space-y-1">
                         <div className="flex flex-wrap items-center gap-2">
                           <span className="font-mono font-semibold text-cyan-300 bg-cyan-950/40 px-2 py-0.5 rounded text-[11px] border border-cyan-800/40">
                             {iframe.domain}
+                          </span>
+                          <span
+                            className={`text-[10px] font-mono px-1.5 py-0.5 rounded border font-semibold ${
+                              isProbable
+                                ? 'text-emerald-400 bg-emerald-950/40 border-emerald-800/50'
+                                : isUtility
+                                ? 'text-amber-400 bg-amber-950/40 border-amber-800/50'
+                                : 'text-neutral-400 bg-neutral-900 border-neutral-700/60'
+                            }`}
+                          >
+                            {isProbable ? 'Provável Player de Vídeo' : isUtility ? 'Iframe Utilitário (Chat/Login/Serviço)' : 'Finalidade Não Confirmada'}
                           </span>
                           <span
                             className={`text-[10px] font-mono px-1.5 py-0.2 rounded border ${
@@ -806,16 +941,21 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
                             </span>
                           )}
                         </div>
-                        <p className="font-mono text-[10px] text-neutral-500 truncate mt-1" title={iframe.url}>
+                        {iframe.classificationReason && (
+                          <p className="text-[11px] text-neutral-400 leading-snug">
+                            {iframe.classificationReason}
+                          </p>
+                        )}
+                        <p className="font-mono text-[10px] text-neutral-500 truncate" title={iframe.url}>
                           Destino: {iframe.url}
                         </p>
                       </div>
                     </div>
-                  ))}
+                  );})}
                 </div>
               </div>
             </div>
-          )}
+          );})()}
 
           {/* Card Detalhado de Carregamento Dinâmico de Mídia */}
           {inspectionResult.dynamicMediaIndicators && inspectionResult.dynamicMediaIndicators.length > 0 && (
@@ -954,9 +1094,16 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
               {/* URL do Stream e Ações */}
               <div className="p-2.5 rounded-lg bg-neutral-900/90 border border-neutral-800 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                 <div className="min-w-0 flex-1">
-                  <span className="text-[10px] text-neutral-500 uppercase tracking-wider block">URL Direta do Vídeo Extraída</span>
-                  <p className="font-mono text-[11px] text-neutral-300 truncate mt-0.5" title={activeSource.url}>
-                    {activeSource.url}
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] text-neutral-500 uppercase tracking-wider block">URL Direta do Vídeo Extraída</span>
+                    {validationEvaluation.isTemporary && (
+                      <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-amber-950/70 border border-amber-800/60 text-amber-300">
+                        ASSINADA / TEMPORÁRIA
+                      </span>
+                    )}
+                  </div>
+                  <p className="font-mono text-[11px] text-neutral-300 truncate mt-0.5" title={validationEvaluation.sanitizedUrl}>
+                    {validationEvaluation.sanitizedUrl}
                   </p>
                 </div>
                 <div className="flex items-center gap-1.5 shrink-0 self-end sm:self-auto">
@@ -969,7 +1116,7 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
                     <span>{copiedStream ? 'Copiado' : 'Copiar URL'}</span>
                   </button>
                   <a
-                    href={inspectionResult.pageUrl}
+                    href={activeSource.url}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-neutral-950 bg-cyan-400 hover:bg-cyan-300 rounded-md transition-colors"
@@ -1001,12 +1148,12 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
               </div>
               <p className="text-neutral-400 text-[11px] leading-relaxed">
                 {inspectionResult.diagnostics.status === 'challenge_or_interstitial_detected'
-                  ? 'Atenção: Esta resposta representa uma limitação de acesso automatizado devido a uma proteção intermediária (ex: Cloudflare "Just a moment..."), e NÃO significa que o episódio não possui vídeo no site de origem. O vídeo pode estar presente e funcional no navegador de uso comum.'
+                  ? 'Atenção (Limitação de Acesso): O servidor remoto retornou uma página intermediária de proteção (ex: Cloudflare "Just a moment..."). Isso decorre de políticas de proteção anti-bot para requisições automatizadas de servidor e NÃO significa ausência de vídeo no episódio, que pode reproduzir normalmente no navegador.'
                   : inspectionResult.diagnostics.status === 'embedded_player_detected'
-                  ? 'O conteúdo desta página depende de um iframe isolado de outro domínio. O NOVA STORAGE respeita os limites de segurança da web e não executa scraping forçado nem acessa conteúdo protegido de terceiros.'
+                  ? 'Atenção (Player Incorporado): Foi identificado um iframe com indícios de player de vídeo, mas sem exposição de arquivo direto no HTML inicial. Para reprodução direta no NOVA STORAGE, forneça o link de manifesto (.m3u8) ou vídeo (.mp4) da CDN.'
                   : inspectionResult.diagnostics.status === 'dynamic_loading_detected'
-                  ? 'O streaming de vídeo desta página é orquestrado sob demanda via JavaScript dinâmico no navegador. Fontes diretas estáticas (.m3u8/.mp4) não foram expostas no HTML inicial.'
-                  : 'O HTML inicial da página não expõe tags de vídeo abertas, iframes incorporados nem scripts de carregamento de mídia reconhecidos.'}
+                  ? 'Atenção (Carregamento Dinâmico): O episódio utiliza carregamento dinâmico via JavaScript no navegador (sob demanda após interação ou clique no botão de reprodução). O HTML estático inicial não expõe as URLs de mídia. Obtenha a URL direta (.m3u8/.mp4) via inspeção de rede do navegador.'
+                  : 'Atenção (Sem Fontes de Vídeo): O HTML analisado não contém tags de vídeo (<video>/<source>), metadados de compartilhamento (og:video) nem bibliotecas de player. Iframes utilitários presentes (como chat de suporte ou login) foram devidamente identificados e não são tratados como players de vídeo.'}
               </p>
             </div>
           )}
@@ -1042,43 +1189,45 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
 
               {/* Diagnóstico em caso de falha de reprodução */}
               {playbackState === 'error' && (
-                <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 text-xs text-rose-300 space-y-2.5">
-                  <div className="flex items-center gap-2 font-semibold text-rose-200">
-                    <AlertTriangle className="w-4 h-4 shrink-0 text-rose-400" />
-                    <span>Falha na Reprodução no Navegador</span>
+                <div
+                  className={`p-4 rounded-xl border text-xs space-y-2.5 ${
+                    validationEvaluation.state === 'temporary_or_expired'
+                      ? 'bg-amber-950/25 border-amber-500/40 text-amber-200'
+                      : validationEvaluation.state === 'inconclusive'
+                      ? 'bg-neutral-900/80 border-neutral-700 text-neutral-300'
+                      : 'bg-rose-500/10 border-rose-500/30 text-rose-300'
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-2 font-semibold">
+                    <div className="flex items-center gap-2">
+                      {validationEvaluation.state === 'temporary_or_expired' ? (
+                        <AlertTriangle className="w-4 h-4 shrink-0 text-amber-400" />
+                      ) : validationEvaluation.state === 'inconclusive' ? (
+                        <Info className="w-4 h-4 shrink-0 text-neutral-400" />
+                      ) : (
+                        <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
+                      )}
+                      <span>{validationEvaluation.stateLabel}</span>
+                    </div>
+                    <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-black/40 border border-white/10 text-neutral-300">
+                      CÓDIGO {browserErrorCode ?? 'N/D'}
+                    </span>
                   </div>
+
                   <p className="text-neutral-300 text-[11px] leading-relaxed">
-                    {playbackErrorDetail || 'O navegador não conseguiu carregar o fluxo de vídeo da fonte remota.'}
+                    {validationEvaluation.summaryMessage}
                   </p>
 
-                  <div className="bg-neutral-950/70 p-3 rounded-lg border border-neutral-800/80 space-y-1.5 text-[11px] text-neutral-400">
-                    <span className="font-semibold text-neutral-300 block">Diagnóstico Baseado em Evidências:</span>
-                    <ul className="list-disc list-inside space-y-1 text-neutral-400">
-                      {activeSource.statusCode === 403 && (
-                        <li className="text-rose-300">
-                          <strong>Acesso Negado (HTTP 403 Forbidden):</strong> O servidor de origem (ex: Google Cloud Storage) retornou documento XML de recusa (AccessDenied). O arquivo é privado e não possui permissão de leitura anônima.
-                        </li>
-                      )}
-                      {activeSource.corsSupported ? (
-                        <li className="text-emerald-300">
-                          <strong>CORS Verificado:</strong> O servidor de origem retornou o cabeçalho <code className="text-emerald-400">Access-Control-Allow-Origin: *</code>. A falha NÃO foi causada por restrição de CORS.
-                        </li>
-                      ) : (
-                        <li className="text-amber-300">
-                          <strong>Ausência de CORS Declarado:</strong> O servidor de mídia não enviou cabeçalho de CORS aberto para conexões de outros domínios.
-                        </li>
-                      )}
-                      {activeSource.supportsRange ? (
-                        <li className="text-emerald-300">
-                          <strong>Suporte a Range:</strong> O servidor responde a requisições parciais (HTTP 206 Partial Content).
-                        </li>
-                      ) : (
-                        <li className="text-amber-300">
-                          <strong>Sem Suporte a Range (206):</strong> Arquivos MP4 transmitidos via streaming necessitam de suporte a requisições parciais por bytes para decodificação no navegador.
-                        </li>
-                      )}
-                    </ul>
-                  </div>
+                  {validationEvaluation.evidence.length > 0 && (
+                    <div className="bg-neutral-950/80 p-3 rounded-lg border border-neutral-800/80 space-y-1.5 text-[11px] text-neutral-400">
+                      <span className="font-semibold text-neutral-300 block">Evidências Concretas do Diagnóstico:</span>
+                      <ul className="list-disc list-inside space-y-1 text-neutral-300">
+                        {validationEvaluation.evidence.map((ev, i) => (
+                          <li key={i}>{ev}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
                 </div>
               )}
 

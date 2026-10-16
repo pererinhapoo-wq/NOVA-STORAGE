@@ -2,6 +2,8 @@ import { validateUrlForSsrf } from '../utils/ssrfGuard.ts';
 
 export type MediaFormat = 'HLS' | 'MP4' | 'WEBM' | 'IFRAME_EMBED' | 'UNKNOWN';
 
+export type IframeClassification = 'probable_player' | 'utility_or_service' | 'unknown_purpose';
+
 export interface ExtractedMediaSource {
   url: string;
   format: MediaFormat;
@@ -28,6 +30,8 @@ export interface DetectedIframe {
   origin: string;
   isCrossOrigin: boolean;
   title?: string;
+  classification: IframeClassification;
+  classificationReason: string;
 }
 
 export interface DynamicMediaIndicator {
@@ -135,6 +139,199 @@ function extractTitle(html: string): string {
 }
 
 /**
+ * Classifica iframes por indícios semânticos em:
+ * - 'utility_or_service': autenticação, login, chat de suporte, formulários, captcha, anúncios
+ * - 'probable_player': provedores conhecidos de vídeo, padrões de path (/embed/, /player/, /e/), parâmetros de vídeo
+ * - 'unknown_purpose': sem indícios claros de player nem de serviço utilitário
+ */
+export function classifyIframe(
+  url: string,
+  title?: string
+): { classification: IframeClassification; reason: string } {
+  let urlObj: URL | null = null;
+  try {
+    urlObj = new URL(url);
+  } catch {
+    // URL relativa ou formato inválido
+  }
+
+  const pathAndQuery = urlObj ? `${urlObj.pathname}${urlObj.search}`.toLowerCase() : url.toLowerCase();
+  const hostname = urlObj ? urlObj.hostname.toLowerCase() : '';
+  const titleLower = (title || '').toLowerCase();
+
+  // 1. Indícios Semânticos de Iframe Utilitário ou Serviço (chat, login, auth, anúncio, captcha)
+  const isChat =
+    pathAndQuery.includes('/chat') ||
+    pathAndQuery.includes('chat2') ||
+    pathAndQuery.includes('livechat') ||
+    hostname.includes('tawk.to') ||
+    hostname.includes('crisp.chat') ||
+    hostname.includes('zendesk') ||
+    hostname.includes('intercom') ||
+    hostname.includes('disqus') ||
+    titleLower.includes('chat') ||
+    titleLower.includes('atendimento') ||
+    titleLower.includes('suporte');
+
+  const isAuthOrLogin =
+    pathAndQuery.includes('login') ||
+    pathAndQuery.includes('signin') ||
+    pathAndQuery.includes('sign-in') ||
+    pathAndQuery.includes('auth') ||
+    pathAndQuery.includes('oauth') ||
+    pathAndQuery.includes('entrar') ||
+    pathAndQuery.includes('register') ||
+    pathAndQuery.includes('signup') ||
+    hostname.startsWith('auth.') ||
+    hostname.startsWith('login.') ||
+    titleLower.includes('login') ||
+    titleLower.includes('autentic') ||
+    titleLower.includes('acesso à conta') ||
+    titleLower.includes('entrar');
+
+  const isCaptchaOrSecurity =
+    hostname.includes('recaptcha') ||
+    hostname.includes('hcaptcha') ||
+    pathAndQuery.includes('recaptcha') ||
+    pathAndQuery.includes('hcaptcha') ||
+    pathAndQuery.includes('turnstile') ||
+    titleLower.includes('captcha') ||
+    titleLower.includes('verificação');
+
+  const isAdOrTracker =
+    hostname.includes('doubleclick') ||
+    hostname.includes('googlesyndication') ||
+    hostname.includes('adnxs') ||
+    hostname.includes('adserver') ||
+    pathAndQuery.includes('/ads/') ||
+    pathAndQuery.includes('/adserver') ||
+    titleLower.includes('anúncio') ||
+    titleLower.includes('publicidade');
+
+  if (isChat || isAuthOrLogin || isCaptchaOrSecurity || isAdOrTracker) {
+    let reason = 'Iframe utilitário de serviço identificado';
+    if (isChat && isAuthOrLogin) {
+      reason = 'Iframe utilitário de chat e autenticação (ex: /chat2/login.php)';
+    } else if (isChat) {
+      reason = 'Iframe utilitário de chat de atendimento ou suporte';
+    } else if (isAuthOrLogin) {
+      reason = 'Iframe utilitário de autenticação ou login de usuário';
+    } else if (isCaptchaOrSecurity) {
+      reason = 'Iframe de serviço de segurança / verificação anti-bot';
+    } else if (isAdOrTracker) {
+      reason = 'Iframe de publicidade ou medição de tráfego';
+    }
+    return {
+      classification: 'utility_or_service',
+      reason
+    };
+  }
+
+  // 2. Indícios Semânticos de Provável Player de Vídeo
+  const knownVideoDomains = [
+    'youtube.com',
+    'youtube-nocookie.com',
+    'youtu.be',
+    'vimeo.com',
+    'dailymotion.com',
+    'twitch.tv',
+    'streamtape.com',
+    'streamtape.net',
+    'mp4upload.com',
+    'doodstream.com',
+    'dood.to',
+    'dood.so',
+    'dood.cx',
+    'dood.la',
+    'dood.ws',
+    'dood.sh',
+    'voe.sx',
+    'mixdrop.co',
+    'mixdrop.to',
+    'mixdrop.ch',
+    'mixdrop.bz',
+    'filemoon.sx',
+    'filemoon.to',
+    'filemoon.in',
+    'streamwish.to',
+    'streamwish.com',
+    'vidmoly.me',
+    'vidmoly.net',
+    'streamlare.com',
+    'upstream.to',
+    'uqload.com',
+    'uqload.to',
+    'embedrise.com',
+    'supervideo.tv',
+    'waaw.to',
+    'netu.tv',
+    'vidlox.me',
+    'vidsrc.me',
+    'vidsrc.to',
+    'vidsrc.net',
+    'vidsrc.in',
+    'vidsrc.pm',
+    'vidplay.site',
+    'vidplay.online',
+    'megacloud.tv',
+    'rabbitstream.net',
+    'dokicloud.one'
+  ];
+
+  const matchesKnownVideoDomain = knownVideoDomains.some(
+    d => hostname === d || hostname.endsWith(`.${d}`)
+  );
+
+  const hasPlayerSubdomain = hostname.startsWith('player.') || hostname.startsWith('embed.') || hostname.startsWith('video.');
+
+  const hasPlayerPath =
+    pathAndQuery.startsWith('/embed/') ||
+    pathAndQuery.includes('/embed/') ||
+    pathAndQuery.startsWith('/player/') ||
+    pathAndQuery.includes('/player/') ||
+    pathAndQuery.includes('/player.php') ||
+    pathAndQuery.startsWith('/e/') ||
+    pathAndQuery.includes('/e/') ||
+    pathAndQuery.includes('/video/') ||
+    pathAndQuery.includes('/stream/') ||
+    pathAndQuery.includes('player=') ||
+    pathAndQuery.includes('video_id=') ||
+    pathAndQuery.includes('.m3u8') ||
+    pathAndQuery.includes('.mp4');
+
+  const hasPlayerTitle =
+    titleLower.includes('player') ||
+    titleLower.includes('reprodutor') ||
+    titleLower.includes('vídeo') ||
+    titleLower.includes('video') ||
+    titleLower.includes('stream') ||
+    titleLower.includes('assistir');
+
+  if (matchesKnownVideoDomain || hasPlayerSubdomain || hasPlayerPath || hasPlayerTitle) {
+    let reason = 'Indícios semânticos de player de vídeo';
+    if (matchesKnownVideoDomain) {
+      reason = `Provedor de hospedagem de vídeo reconhecido (${hostname})`;
+    } else if (hasPlayerPath) {
+      reason = 'Estrutura de URL compatível com player/incorporação (/embed/, /player/, /e/)';
+    } else if (hasPlayerSubdomain) {
+      reason = `Subdomínio dedicado a streaming/player (${hostname})`;
+    } else if (hasPlayerTitle) {
+      reason = `Título do elemento declara reprodução de mídia ("${title}")`;
+    }
+    return {
+      classification: 'probable_player',
+      reason
+    };
+  }
+
+  // 3. Finalidade Desconhecida / Sem Evidências de Vídeo
+  return {
+    classification: 'unknown_purpose',
+    reason: 'Iframe sem evidências objetivas de reprodução de vídeo ou serviços conhecidos'
+  };
+}
+
+/**
  * Determina o status da inspeção diferenciando claramente os cenários:
  * 1. Nenhuma fonte aberta encontrada
  * 2. Player incorporado (iframe) identificado
@@ -151,6 +348,7 @@ export function determineInspectionStatus(params: {
   detectedChallenge?: boolean;
   challengeInfo?: InterstitialChallengeInfo;
   iframesCount: number;
+  detectedIframes?: DetectedIframe[];
   dynamicIndicatorsCount: number;
   firstIframeDomain?: string;
   httpStatusCode?: number;
@@ -214,24 +412,82 @@ export function determineInspectionStatus(params: {
     }
   }
 
-  if (params.iframesCount > 0) {
-    const domainText = params.firstIframeDomain ? ` do domínio "${params.firstIframeDomain}"` : '';
-    details.push(`${params.iframesCount} elemento(s) iframe detectado(s) no HTML da página.`);
+  // Análise semântica dos iframes detectados
+  const iframes = params.detectedIframes || [];
+  const probablePlayers = iframes.filter(i => i.classification === 'probable_player');
+  const utilityIframes = iframes.filter(i => i.classification === 'utility_or_service');
+  const unknownIframes = iframes.filter(i => i.classification === 'unknown_purpose');
+
+  // Retrocompatibilidade quando detectedIframes não é passado explicitamente
+  const hasProbablePlayerFallback = iframes.length === 0 && params.iframesCount > 0 && Boolean(
+    params.firstIframeDomain &&
+    (params.firstIframeDomain.includes('streamtape') ||
+     params.firstIframeDomain.includes('vimeo') ||
+     params.firstIframeDomain.includes('youtube') ||
+     params.firstIframeDomain.includes('player') ||
+     params.firstIframeDomain.includes('embed') ||
+     params.firstIframeDomain.includes('video'))
+  );
+
+  const hasProbablePlayer = probablePlayers.length > 0 || hasProbablePlayerFallback;
+
+  // 1. Se houver provável player de vídeo
+  if (hasProbablePlayer) {
+    const domain = probablePlayers[0]?.domain || params.firstIframeDomain;
+    const domainText = domain ? ` do domínio "${domain}"` : '';
+    const count = probablePlayers.length || params.iframesCount;
+    details.push(`${count} elemento(s) iframe com características de player/embed detectado(s)${domainText}.`);
     details.push('Não é possível afirmar se existe um vídeo ativo apenas pela presença de um iframe.');
     details.push('Por motivos de segurança e política de mesma origem (Same-Origin Policy), o conteúdo interno de iframes de terceiros não é acessado.');
+    if (utilityIframes.length > 0) {
+      details.push(`${utilityIframes.length} outro(s) iframe(s) utilitário(s) identificado(s) na página (chat/login/serviço).`);
+    }
     return {
       status: 'embedded_player_detected',
-      summaryMessage: `Player incorporado (iframe) identificado${domainText} (${params.iframesCount} frame(s) detectado(s)).`,
+      summaryMessage: `Player incorporado (iframe) identificado${domainText} (${count} frame(s) detectado(s)).`,
       diagnosticDetails: details
     };
   }
 
+  // 2. Se houver indícios de carregamento dinâmico (scripts de player / data-* attributes)
   if (params.dynamicIndicatorsCount > 0) {
     details.push(`${params.dynamicIndicatorsCount} indicador(es) de carregamento dinâmico ou biblioteca de player encontrado(s) no HTML.`);
     details.push('A página não expõe a URL de mídia diretamente no DOM estático; o fluxo de vídeo costuma ser solicitado sob demanda via requisições assíncronas do cliente.');
+    if (utilityIframes.length > 0) {
+      details.push(`${utilityIframes.length} iframe(s) utilitário(s) identificado(s) (${utilityIframes.map(i => i.domain).join(', ')}), sem evidência de reprodução de vídeo.`);
+    }
+    if (unknownIframes.length > 0) {
+      details.push(`${unknownIframes.length} iframe(s) de finalidade não confirmada detectado(s), sem indícios de reprodução.`);
+    }
     return {
       status: 'dynamic_loading_detected',
       summaryMessage: 'Possível carregamento dinâmico de mídia detectado. Bibliotecas de player ou configurações dinâmicas foram encontradas no código da página.',
+      diagnosticDetails: details
+    };
+  }
+
+  // 3. Se houver apenas iframes utilitários (ex: /chat2/login.php)
+  if (utilityIframes.length > 0 && unknownIframes.length === 0) {
+    const utilityCount = utilityIframes.length;
+    details.push(`${utilityCount} elemento(s) iframe utilitário(s) identificado(s) no HTML (chat/login/serviço).`);
+    details.push('Nenhum elemento de vídeo, tag <video>, tag <source> ou metadados de compartilhamento foram encontrados.');
+    details.push('O NOVA STORAGE não afirma que existe vídeo em iframes utilitários sem evidências objetivas.');
+    return {
+      status: 'no_sources',
+      summaryMessage: `Nenhuma fonte aberta de vídeo encontrada. O(s) ${utilityCount} iframe(s) detectado(s) são utilitários (chat/login/serviço) e não correspondem a players de vídeo.`,
+      diagnosticDetails: details
+    };
+  }
+
+  // 4. Se houver iframes com finalidade desconhecida sem evidências de player
+  if (unknownIframes.length > 0 || (iframes.length === 0 && params.iframesCount > 0)) {
+    const unkCount = unknownIframes.length || params.iframesCount;
+    details.push(`${unkCount} elemento(s) iframe com finalidade não confirmada identificado(s) no HTML.`);
+    details.push('Não foram identificadas tags de vídeo, metadados nem padrões semânticos de players conhecidos.');
+    details.push('O NOVA STORAGE não assume a presença de vídeo em iframes sem evidências claras.');
+    return {
+      status: 'no_sources',
+      summaryMessage: `Nenhuma fonte aberta de vídeo encontrada. O(s) iframe(s) detectado(s) possuem finalidade desconhecida, sem indícios semânticos de player.`,
       diagnosticDetails: details
     };
   }
@@ -469,13 +725,17 @@ export async function extractMediaFromHtml(
           const domain = iframeUrlObj.hostname.toLowerCase();
           const origin = iframeUrlObj.origin;
           const isCrossOrigin = pageUrlObj ? iframeUrlObj.origin !== pageUrlObj.origin : true;
+          const title = titleMatch ? titleMatch[1].trim() : undefined;
+          const classificationResult = classifyIframe(resolved, title);
 
           detectedIframesMap.set(resolved, {
             url: resolved,
             domain,
             origin,
             isCrossOrigin,
-            title: titleMatch ? titleMatch[1].trim() : undefined
+            title,
+            classification: classificationResult.classification,
+            classificationReason: classificationResult.reason
           });
         } catch {
           // Ignora URL malformada de iframe

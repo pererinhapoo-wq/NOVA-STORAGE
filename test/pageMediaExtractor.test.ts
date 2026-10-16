@@ -171,6 +171,7 @@ test('Extração e Identificação de Mídias em Páginas Web', async (t) => {
     assert.strictEqual(result.detectedIframes[0].origin, 'https://streamtape.com');
     assert.strictEqual(result.detectedIframes[0].isCrossOrigin, true);
     assert.strictEqual(result.detectedIframes[0].title, 'Player Streamtape');
+    assert.strictEqual(result.detectedIframes[0].classification, 'probable_player');
 
     const diag = determineInspectionStatus({
       sourcesCount: result.sources.length,
@@ -178,6 +179,7 @@ test('Extração e Identificação de Mídias em Páginas Web', async (t) => {
       detectedDrm: result.detectedDrm,
       detectedProtection: result.detectedProtection,
       iframesCount: result.detectedIframes.length,
+      detectedIframes: result.detectedIframes,
       dynamicIndicatorsCount: result.dynamicMediaIndicators.length,
       firstIframeDomain: result.detectedIframes[0].domain
     });
@@ -204,6 +206,7 @@ test('Extração e Identificação de Mídias em Páginas Web', async (t) => {
     assert.strictEqual(result.detectedIframes[0].url, 'https://sub.empresa.com/embed/player?v=987');
     assert.strictEqual(result.detectedIframes[0].domain, 'sub.empresa.com');
     assert.strictEqual(result.detectedIframes[0].isCrossOrigin, false, 'Iframe no mesmo subdomínio é Same-Origin');
+    assert.strictEqual(result.detectedIframes[0].classification, 'probable_player');
   });
 
   await t.test('12. Detecta possíveis carregamentos dinâmicos de mídia via bibliotecas de player e atributos data-*', async () => {
@@ -451,6 +454,7 @@ test('Extração e Identificação de Mídias em Páginas Web', async (t) => {
     assert.strictEqual(result.detectedIframes.length, 1);
     assert.strictEqual(result.detectedIframes[0].domain, 'auth.coempregos.com.br');
     assert.strictEqual(result.detectedIframes[0].title, 'Acesso à Conta');
+    assert.strictEqual(result.detectedIframes[0].classification, 'utility_or_service');
 
     const statusResult = determineInspectionStatus({
       sourcesCount: result.sources.length,
@@ -458,11 +462,142 @@ test('Extração e Identificação de Mídias em Páginas Web', async (t) => {
       detectedDrm: false,
       detectedProtection: false,
       iframesCount: 1,
+      detectedIframes: result.detectedIframes,
       dynamicIndicatorsCount: 0,
       firstIframeDomain: result.detectedIframes[0].domain
     });
 
+    assert.strictEqual(statusResult.status, 'no_sources');
+    assert.ok(statusResult.summaryMessage.includes('utilitários'));
+    assert.ok(statusResult.diagnosticDetails.some(d => d.includes('chat/login/serviço')));
+  });
+
+  await t.test('17. Classifica semântica de iframe apontando para /chat2/login.php e não afirma que é player', async () => {
+    // Caso real do Coempregos (vagas/1/jardineiro)
+    const htmlWithChat2 = `
+      <!DOCTYPE html>
+      <html>
+        <head><title>Vaga de Jardineiro - Coempregos</title></head>
+        <body>
+          <div class="chat-wrapper">
+            <iframe src="/chat2/login.php" width="300" height="400" title="Atendimento"></iframe>
+          </div>
+        </body>
+      </html>
+    `;
+
+    const result = await extractMediaFromHtml(htmlWithChat2, 'https://www.coempregos.com.br/v/vagas/1/jardineiro');
+    assert.strictEqual(result.sources.length, 0, 'Zero fontes diretas no HTML inicial');
+    assert.strictEqual(result.detectedIframes.length, 1);
+    assert.strictEqual(result.detectedIframes[0].url, 'https://www.coempregos.com.br/chat2/login.php');
+    assert.strictEqual(result.detectedIframes[0].domain, 'www.coempregos.com.br');
+    assert.strictEqual(result.detectedIframes[0].classification, 'utility_or_service');
+    assert.ok(result.detectedIframes[0].classificationReason.includes('chat'));
+
+    const statusResult = determineInspectionStatus({
+      sourcesCount: 0,
+      hasAccessibleDirectSource: false,
+      detectedDrm: false,
+      detectedProtection: false,
+      iframesCount: 1,
+      detectedIframes: result.detectedIframes,
+      dynamicIndicatorsCount: 0
+    });
+
+    assert.strictEqual(statusResult.status, 'no_sources');
+    assert.ok(statusResult.summaryMessage.includes('utilitários'));
+    assert.ok(statusResult.diagnosticDetails.some(d => d.includes('chat/login/serviço')));
+  });
+
+  await t.test('18. Trata página com iframe utilitário (/chat2/login.php) e carregamento dinâmico de player via script', async () => {
+    // Caso em que o site tem um iframe de chat E scripts de player dinâmico
+    const htmlDynamicWithChat = `
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <title>Portal com Vídeo Dinâmico e Suporte</title>
+          <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+        </head>
+        <body>
+          <div id="player-container"></div>
+          <iframe src="/chat2/login.php" title="Suporte"></iframe>
+        </body>
+      </html>
+    `;
+
+    const result = await extractMediaFromHtml(htmlDynamicWithChat, 'https://www.coempregos.com.br/vaga');
+    assert.strictEqual(result.detectedIframes[0].classification, 'utility_or_service');
+    assert.ok(result.dynamicMediaIndicators.length > 0);
+
+    const statusResult = determineInspectionStatus({
+      sourcesCount: 0,
+      hasAccessibleDirectSource: false,
+      detectedDrm: false,
+      detectedProtection: false,
+      iframesCount: 1,
+      detectedIframes: result.detectedIframes,
+      dynamicIndicatorsCount: result.dynamicMediaIndicators.length
+    });
+
+    assert.strictEqual(statusResult.status, 'dynamic_loading_detected');
+    assert.ok(statusResult.summaryMessage.includes('dinâmico'));
+    assert.ok(statusResult.diagnosticDetails.some(d => d.includes('utilitário')));
+  });
+
+  await t.test('19. Trata iframe com finalidade não confirmada sem classificá-lo como player', async () => {
+    const htmlWithUnknownIframe = `
+      <html>
+        <head><title>Página Institucional</title></head>
+        <body>
+          <iframe src="https://parceiro.com.br/informes/quadro" title="Quadro de Avisos"></iframe>
+        </body>
+      </html>
+    `;
+
+    const result = await extractMediaFromHtml(htmlWithUnknownIframe, 'https://empresa.com.br/painel');
+    assert.strictEqual(result.detectedIframes.length, 1);
+    assert.strictEqual(result.detectedIframes[0].classification, 'unknown_purpose');
+
+    const statusResult = determineInspectionStatus({
+      sourcesCount: 0,
+      hasAccessibleDirectSource: false,
+      detectedDrm: false,
+      detectedProtection: false,
+      iframesCount: 1,
+      detectedIframes: result.detectedIframes,
+      dynamicIndicatorsCount: 0
+    });
+
+    assert.strictEqual(statusResult.status, 'no_sources');
+    assert.ok(statusResult.summaryMessage.includes('finalidade desconhecida'));
+  });
+
+  await t.test('20. Identifica iframe de provedores de player conhecidos (Vimeo, YouTube, Doodstream)', async () => {
+    const htmlWithKnownPlayer = `
+      <html>
+        <head><title>Aula em Vídeo</title></head>
+        <body>
+          <iframe src="https://player.vimeo.com/video/76979871" width="640" height="360" allowfullscreen></iframe>
+        </body>
+      </html>
+    `;
+
+    const result = await extractMediaFromHtml(htmlWithKnownPlayer, 'https://curso.com/aula-1');
+    assert.strictEqual(result.detectedIframes.length, 1);
+    assert.strictEqual(result.detectedIframes[0].domain, 'player.vimeo.com');
+    assert.strictEqual(result.detectedIframes[0].classification, 'probable_player');
+
+    const statusResult = determineInspectionStatus({
+      sourcesCount: 0,
+      hasAccessibleDirectSource: false,
+      detectedDrm: false,
+      detectedProtection: false,
+      iframesCount: 1,
+      detectedIframes: result.detectedIframes,
+      dynamicIndicatorsCount: 0
+    });
+
     assert.strictEqual(statusResult.status, 'embedded_player_detected');
-    assert.ok(statusResult.diagnosticDetails.some(d => d.includes('Não é possível afirmar se existe um vídeo ativo')));
+    assert.ok(statusResult.summaryMessage.includes('player.vimeo.com'));
   });
 });

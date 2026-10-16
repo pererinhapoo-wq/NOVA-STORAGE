@@ -154,6 +154,7 @@ mediaInspectRouter.post('/inspect-page', async (req, res) => {
       detectedChallenge: extraction.interstitialChallenge?.detected,
       challengeInfo: extraction.interstitialChallenge,
       iframesCount: extraction.detectedIframes.length,
+      detectedIframes: extraction.detectedIframes,
       dynamicIndicatorsCount: extraction.dynamicMediaIndicators.length,
       firstIframeDomain,
       httpStatusCode: pageResponse.status,
