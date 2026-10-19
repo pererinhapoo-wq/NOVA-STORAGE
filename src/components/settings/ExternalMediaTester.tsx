@@ -50,6 +50,32 @@ const SAMPLE_HLS_URL = 'https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8';
 const SAMPLE_MP4_GTV_URL = 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4';
 const SAMPLE_MP4_CC0_URL = 'https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4';
 
+/**
+ * Classifica e formata a resolução real do vídeo a partir das dimensões decodificadas pelo navegador
+ */
+export function formatRealResolution(width?: number | null, height?: number | null): string {
+  if (!width || !height || width <= 0 || height <= 0) {
+    return 'Aguardando metadados';
+  }
+
+  let tag = `${height}p`;
+  if (height >= 2160 || width >= 3840) {
+    tag = '2160p (4K)';
+  } else if (height >= 1440 || width >= 2560) {
+    tag = '1440p';
+  } else if (height >= 1080 || width >= 1900) {
+    tag = '1080p (Full HD)';
+  } else if (height >= 720 || width >= 1200) {
+    tag = '720p (HD)';
+  } else if (height >= 480 || width >= 800) {
+    tag = '480p';
+  } else if (height >= 360 || width >= 600) {
+    tag = '360p';
+  }
+
+  return `${width} × ${height} (${tag})`;
+}
+
 export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNotify }) => {
   const [inputUrl, setInputUrl] = useState('');
   const [isInspecting, setIsInspecting] = useState(false);
@@ -58,6 +84,7 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
   const [playbackState, setPlaybackState] = useState<PlaybackState>('idle');
   const [playbackErrorDetail, setPlaybackErrorDetail] = useState<string | null>(null);
   const [browserErrorCode, setBrowserErrorCode] = useState<number | null>(null);
+  const [videoDimensions, setVideoDimensions] = useState<{ width: number; height: number } | null>(null);
   const [copiedStream, setCopiedStream] = useState(false);
   const [showBookmarkletGuide, setShowBookmarkletGuide] = useState(false);
   const [copiedBookmarklet, setCopiedBookmarklet] = useState(false);
@@ -108,6 +135,7 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
     setPlaybackState('idle');
     setPlaybackErrorDetail(null);
     setBrowserErrorCode(null);
+    setVideoDimensions(null);
   };
 
   const handleInspect = async () => {
@@ -126,6 +154,7 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
     setPlaybackState('idle');
     setPlaybackErrorDetail(null);
     setBrowserErrorCode(null);
+    setVideoDimensions(null);
 
     try {
       const response = await ExternalMediaService.inspectPage(trimmed);
@@ -211,6 +240,7 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
     setPlaybackState('idle');
     setPlaybackErrorDetail(null);
     setBrowserErrorCode(null);
+    setVideoDimensions(null);
     setInputUrl(url);
   };
 
@@ -246,9 +276,19 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
     const mediaUrl = activeSource.url;
     const isHls = activeSource.format === 'HLS' || mediaUrl.includes('.m3u8');
 
+    const updateDimensions = () => {
+      if (videoEl && videoEl.videoWidth > 0 && videoEl.videoHeight > 0) {
+        setVideoDimensions({
+          width: videoEl.videoWidth,
+          height: videoEl.videoHeight
+        });
+      }
+    };
+
     destroyHls();
     setPlaybackState('connecting');
     setPlaybackErrorDetail(null);
+    setVideoDimensions(null);
 
     if (isHls) {
       if (Hls.isSupported()) {
@@ -263,6 +303,7 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
 
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
           setPlaybackState('canplay');
+          updateDimensions();
         });
 
         hls.on(Hls.Events.ERROR, (_event, data) => {
@@ -283,11 +324,30 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
             hls.destroy();
           }
         });
+
+        const handleHlsMetadata = () => {
+          updateDimensions();
+        };
+        const handleHlsResize = () => {
+          updateDimensions();
+        };
+
+        videoEl.addEventListener('loadedmetadata', handleHlsMetadata);
+        videoEl.addEventListener('resize', handleHlsResize);
+
+        return () => {
+          videoEl.removeEventListener('loadedmetadata', handleHlsMetadata);
+          videoEl.removeEventListener('resize', handleHlsResize);
+        };
       } else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
         videoEl.src = mediaUrl;
         const handleLoaded = () => {
           setPlaybackState('canplay');
           setBrowserErrorCode(null);
+          updateDimensions();
+        };
+        const handleResize = () => {
+          updateDimensions();
         };
         const handleError = () => {
           setPlaybackState('error');
@@ -296,10 +356,12 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
         };
 
         videoEl.addEventListener('loadedmetadata', handleLoaded);
+        videoEl.addEventListener('resize', handleResize);
         videoEl.addEventListener('error', handleError);
 
         return () => {
           videoEl.removeEventListener('loadedmetadata', handleLoaded);
+          videoEl.removeEventListener('resize', handleResize);
           videoEl.removeEventListener('error', handleError);
         };
       } else {
@@ -313,23 +375,29 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
       videoEl.load();
 
       const handleLoadedMetadata = () => {
-        // Metadados carregados com sucesso pelo navegador
+        updateDimensions();
       };
 
       const handleCanPlay = () => {
         setPlaybackState('canplay');
         setPlaybackErrorDetail(null);
         setBrowserErrorCode(null);
+        updateDimensions();
       };
 
       const handlePlaying = () => {
         setPlaybackState('playing');
         setPlaybackErrorDetail(null);
         setBrowserErrorCode(null);
+        updateDimensions();
       };
 
       const handleWaiting = () => {
         setPlaybackState('connecting');
+      };
+
+      const handleResize = () => {
+        updateDimensions();
       };
 
       const handleVideoErr = () => {
@@ -383,6 +451,7 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
       videoEl.addEventListener('canplay', handleCanPlay);
       videoEl.addEventListener('playing', handlePlaying);
       videoEl.addEventListener('waiting', handleWaiting);
+      videoEl.addEventListener('resize', handleResize);
       videoEl.addEventListener('error', handleVideoErr);
 
       return () => {
@@ -390,6 +459,7 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
         videoEl.removeEventListener('canplay', handleCanPlay);
         videoEl.removeEventListener('playing', handlePlaying);
         videoEl.removeEventListener('waiting', handleWaiting);
+        videoEl.removeEventListener('resize', handleResize);
         videoEl.removeEventListener('error', handleVideoErr);
       };
     }
@@ -1044,7 +1114,7 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
           {/* Detalhes Técnicos da Fonte Selecionada */}
           {activeSource && (
             <div className="p-4 rounded-xl bg-neutral-950/80 border border-neutral-800 space-y-3">
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 text-xs">
                 <div className="bg-neutral-900/60 p-2.5 rounded-lg border border-neutral-800/60">
                   <span className="text-[10px] text-neutral-500 uppercase tracking-wider block">Status HTTP & Código</span>
                   <span
@@ -1097,6 +1167,18 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
                     title={activeSource.mimeType || activeSource.format}
                   >
                     {activeSource.mimeType || activeSource.format}
+                  </span>
+                </div>
+
+                <div className="bg-neutral-900/60 p-2.5 rounded-lg border border-neutral-800/60">
+                  <span className="text-[10px] text-neutral-500 uppercase tracking-wider block">Resolução Real</span>
+                  <span
+                    className={`font-mono block mt-0.5 truncate font-semibold ${
+                      videoDimensions ? 'text-cyan-400' : 'text-neutral-400'
+                    }`}
+                    title={formatRealResolution(videoDimensions?.width, videoDimensions?.height)}
+                  >
+                    {formatRealResolution(videoDimensions?.width, videoDimensions?.height)}
                   </span>
                 </div>
               </div>
@@ -1171,15 +1253,25 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
           {/* Área de Reprodução (Player HLS / MP4) */}
           {activeSource && (
             <div className="space-y-3">
-              <div className="flex items-center justify-between px-1">
+              <div className="flex flex-wrap items-center justify-between gap-2 px-1">
                 <div className="flex items-center gap-2">
                   <Film className="w-4 h-4 text-cyan-400" />
                   <h4 className="text-xs font-bold uppercase tracking-wider text-neutral-300">
                     Player de Teste de Reprodução Direta
                   </h4>
                 </div>
-                <div className="text-[11px] text-neutral-500">
-                  {activeSource.format === 'HLS' ? 'Hls.js Engine Ativa' : 'HTML5 Nativo'}
+                <div className="flex flex-wrap items-center gap-2 text-[11px] text-neutral-400 font-mono">
+                  <span className={`px-2 py-0.5 rounded border ${
+                    videoDimensions
+                      ? 'bg-cyan-950/40 border-cyan-800/50 text-cyan-300 font-semibold'
+                      : 'bg-neutral-900 border-neutral-800 text-neutral-500'
+                  }`}>
+                    Resolução real: {formatRealResolution(videoDimensions?.width, videoDimensions?.height)}
+                  </span>
+                  <span className="text-neutral-600">·</span>
+                  <span className="text-neutral-500">
+                    {activeSource.format === 'HLS' ? 'Hls.js Engine Ativa' : 'HTML5 Nativo'}
+                  </span>
                 </div>
               </div>
 
@@ -1189,7 +1281,27 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
                   ref={videoRef}
                   controls
                   playsInline
-                  onPlay={() => setPlaybackState('playing')}
+                  onPlay={() => {
+                    setPlaybackState('playing');
+                    if (videoRef.current && videoRef.current.videoWidth > 0 && videoRef.current.videoHeight > 0) {
+                      setVideoDimensions({
+                        width: videoRef.current.videoWidth,
+                        height: videoRef.current.videoHeight
+                      });
+                    }
+                  }}
+                  onLoadedMetadata={(e) => {
+                    const el = e.currentTarget;
+                    if (el.videoWidth > 0 && el.videoHeight > 0) {
+                      setVideoDimensions({ width: el.videoWidth, height: el.videoHeight });
+                    }
+                  }}
+                  onResize={(e) => {
+                    const el = e.currentTarget;
+                    if (el.videoWidth > 0 && el.videoHeight > 0) {
+                      setVideoDimensions({ width: el.videoWidth, height: el.videoHeight });
+                    }
+                  }}
                   onWaiting={() => setPlaybackState('connecting')}
                   className="w-full h-full object-contain"
                 >
