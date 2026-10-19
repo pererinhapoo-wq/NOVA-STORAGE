@@ -51,6 +51,8 @@ export interface EpisodeFile {
   remoteProvider: ProviderType | null;
   catalogedAt: string; // ISO 8601
   lastVerifiedAt: string;
+  streamUrl?: string;
+  sourceType?: 'direct_url' | 'google_drive' | 'local_file';
   notes?: string;
 }
 

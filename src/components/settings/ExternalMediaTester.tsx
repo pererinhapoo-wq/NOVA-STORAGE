@@ -703,7 +703,7 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
                       <Play className="w-4 h-4 text-emerald-400 fill-current" />
                     ) : validationEvaluation.state === 'server_accessible' ? (
                       <CheckCircle2 className="w-4 h-4 text-cyan-400" />
-                    ) : validationEvaluation.state === 'temporary_or_expired' ? (
+                    ) : validationEvaluation.state === 'temporary_or_expired' || validationEvaluation.state === 'html_response' ? (
                       <AlertTriangle className="w-4 h-4 text-amber-400" />
                     ) : validationEvaluation.state === 'access_denied' ? (
                       <AlertCircle className="w-4 h-4 text-rose-400" />
@@ -723,6 +723,16 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
                       {validationEvaluation.isTemporary && (
                         <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-amber-950 border border-amber-800 text-amber-300">
                           LINK TEMPORÁRIO
+                        </span>
+                      )}
+                      {activeSource.statusCode && validationEvaluation.state === 'html_response' && (
+                        <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-rose-950/70 border border-rose-800/70 text-rose-300">
+                          HTTP {activeSource.statusCode}
+                        </span>
+                      )}
+                      {activeSource.mimeType && validationEvaluation.state === 'html_response' && (
+                        <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-amber-950/70 border border-amber-800/70 text-amber-300">
+                          {activeSource.mimeType}
                         </span>
                       )}
                       <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-black/40 border border-white/10 text-neutral-300">
@@ -1191,7 +1201,7 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
               {playbackState === 'error' && (
                 <div
                   className={`p-4 rounded-xl border text-xs space-y-2.5 ${
-                    validationEvaluation.state === 'temporary_or_expired'
+                    validationEvaluation.state === 'temporary_or_expired' || validationEvaluation.state === 'html_response'
                       ? 'bg-amber-950/25 border-amber-500/40 text-amber-200'
                       : validationEvaluation.state === 'inconclusive'
                       ? 'bg-neutral-900/80 border-neutral-700 text-neutral-300'
@@ -1200,7 +1210,7 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
                 >
                   <div className="flex items-center justify-between gap-2 font-semibold">
                     <div className="flex items-center gap-2">
-                      {validationEvaluation.state === 'temporary_or_expired' ? (
+                      {validationEvaluation.state === 'temporary_or_expired' || validationEvaluation.state === 'html_response' ? (
                         <AlertTriangle className="w-4 h-4 shrink-0 text-amber-400" />
                       ) : validationEvaluation.state === 'inconclusive' ? (
                         <Info className="w-4 h-4 shrink-0 text-neutral-400" />

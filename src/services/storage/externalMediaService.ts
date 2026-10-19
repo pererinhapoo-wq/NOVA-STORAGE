@@ -87,7 +87,8 @@ export type MediaSourceValidationState =
   | 'temporary_or_expired'
   | 'access_denied'
   | 'playback_failed'
-  | 'inconclusive';
+  | 'inconclusive'
+  | 'html_response';
 
 export interface TemporaryUrlSignatureInfo {
   isPotentiallyTemporary: boolean;
@@ -308,15 +309,57 @@ export function evaluateMediaSourceValidation(params: {
     };
   }
 
-  // 5. Acesso Negado pelo Servidor (HTTP 403/401 sem indícios de assinatura temporária)
+  // Diagnóstico específico: URL intermediária ou resposta HTML quando houver HTTP 403 ou falha de acesso
+  const lowerMime = (source?.mimeType || '').toLowerCase();
+  const isHtmlOrNonMedia = Boolean(
+    lowerMime &&
+      (lowerMime.includes('text/html') ||
+        lowerMime.includes('application/xhtml+xml') ||
+        (!lowerMime.includes('video') &&
+          !lowerMime.includes('audio') &&
+          !lowerMime.includes('mpegurl') &&
+          !lowerMime.includes('octet-stream')))
+  );
+
+  const isAccessFailure =
+    source?.statusCode === 403 ||
+    source?.statusCode === 401 ||
+    source?.accessible === false ||
+    playbackState === 'error';
+
+  if (isHtmlOrNonMedia && isAccessFailure) {
+    if (source?.statusCode) {
+      evidence.push(`Código HTTP real retornado pelo servidor: ${source.statusCode}.`);
+    }
+    if (source?.mimeType) {
+      evidence.push(`Tipo de conteúdo real (Content-Type): "${source.mimeType}".`);
+    }
+    evidence.push('O endereço respondeu com uma página web (documento HTML) e não com um arquivo ou fluxo de vídeo direto.');
+
+    return {
+      state: 'html_response',
+      stateLabel: 'URL intermediária ou resposta HTML',
+      badgeClass: 'bg-amber-950/40 border-amber-500/60 text-amber-200',
+      summaryMessage:
+        'O endereço testado retornou uma página web em vez de um arquivo de vídeo acessível. Isso pode acontecer quando o site utiliza uma página intermediária, um player incorporado ou restrições de acesso. A URL capturada pode não ser o endereço direto da mídia.',
+      evidence,
+      isTemporary: sigInfo.isPotentiallyTemporary,
+      sanitizedUrl
+    };
+  }
+
+  // 5. Acesso Negado pelo Servidor (HTTP 403/401 sem indícios de assinatura temporária e com mídia ou MIME não-HTML)
   if (source?.statusCode === 403 || source?.statusCode === 401) {
     evidence.push(`Resposta HTTP do servidor remoto: ${source.statusCode}.`);
-    evidence.push('O servidor de armazenamento recusou a requisição pública anônima.');
+    if (source?.mimeType) {
+      evidence.push(`Content-Type declarado: "${source.mimeType}".`);
+    }
+    evidence.push('A requisição direta foi recusada pelo servidor de origem.');
     return {
       state: 'access_denied',
       stateLabel: '5. Acesso Negado pelo Servidor',
       badgeClass: 'bg-rose-950/40 border-rose-500/60 text-rose-300',
-      summaryMessage: `Acesso negado pelo servidor remoto (HTTP ${source.statusCode}). O arquivo não possui permissão pública de leitura no armazenamento de origem.`,
+      summaryMessage: `Acesso negado pelo servidor remoto (HTTP ${source.statusCode}). A requisição foi recusada pelo servidor de origem.`,
       evidence,
       isTemporary: sigInfo.isPotentiallyTemporary,
       sanitizedUrl
