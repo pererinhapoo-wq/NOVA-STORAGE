@@ -309,39 +309,47 @@ export function evaluateMediaSourceValidation(params: {
     };
   }
 
-  // Diagnóstico específico: URL intermediária ou resposta HTML quando houver HTTP 403 ou falha de acesso
+  // Diagnóstico específico: Resposta HTML na sondagem do backend (baseada estritamente no Content-Type)
   const lowerMime = (source?.mimeType || '').toLowerCase();
-  const isHtmlOrNonMedia = Boolean(
+  const isHtmlProbe = Boolean(
     lowerMime &&
-      (lowerMime.includes('text/html') ||
-        lowerMime.includes('application/xhtml+xml') ||
-        (!lowerMime.includes('video') &&
-          !lowerMime.includes('audio') &&
-          !lowerMime.includes('mpegurl') &&
-          !lowerMime.includes('octet-stream')))
+      (lowerMime.includes('text/html') || lowerMime.includes('application/xhtml+xml'))
   );
 
-  const isAccessFailure =
-    source?.statusCode === 403 ||
-    source?.statusCode === 401 ||
-    source?.accessible === false ||
-    playbackState === 'error';
-
-  if (isHtmlOrNonMedia && isAccessFailure) {
+  // Classifica como 'html_response' exclusivamente se o Content-Type da sondagem indicar HTML,
+  // sem utilizar o erro do player do navegador como gatilho dessa classificação
+  if (isHtmlProbe) {
     if (source?.statusCode) {
-      evidence.push(`Código HTTP real retornado pelo servidor: ${source.statusCode}.`);
+      evidence.push(`Sondagem do backend: o servidor respondeu com código HTTP ${source.statusCode}.`);
     }
     if (source?.mimeType) {
-      evidence.push(`Tipo de conteúdo real (Content-Type): "${source.mimeType}".`);
+      evidence.push(`Sondagem do backend: Content-Type retornado foi "${source.mimeType}".`);
     }
-    evidence.push('O endereço respondeu com uma página web (documento HTML) e não com um arquivo ou fluxo de vídeo direto.');
+    evidence.push('O servidor remoto retornou um documento HTML na requisição da sondagem, em vez de dados binários de vídeo.');
+
+    // Evidência do elemento de vídeo no navegador mantida estritamente separada
+    if (playbackState === 'error') {
+      evidence.push(
+        `Elemento de vídeo no navegador: erro registrado na reprodução${
+          playbackErrorDetail ? ` (${playbackErrorDetail})` : ''
+        }.`
+      );
+    } else if (playbackState === 'connecting') {
+      evidence.push('Elemento de vídeo no navegador: conectando ao fluxo...');
+    } else {
+      evidence.push('Elemento de vídeo no navegador: reprodução ainda não confirmada.');
+    }
+
+    const is403 = source?.statusCode === 403;
+    const summaryMessage = is403
+      ? 'A sondagem HTTP feita pelo backend foi recusada com HTTP 403 e retornou uma página HTML (possíveis causas incluem restrição de acesso, sessão, token ou bloqueio a requisições de servidor). A reprodução no navegador ainda não foi confirmada.'
+      : 'O endereço testado retornou uma página web (HTML) na sondagem em vez de um arquivo de vídeo acessível. A URL capturada pode não ser o endereço direto da mídia.';
 
     return {
       state: 'html_response',
       stateLabel: 'URL intermediária ou resposta HTML',
       badgeClass: 'bg-amber-950/40 border-amber-500/60 text-amber-200',
-      summaryMessage:
-        'O endereço testado retornou uma página web em vez de um arquivo de vídeo acessível. Isso pode acontecer quando o site utiliza uma página intermediária, um player incorporado ou restrições de acesso. A URL capturada pode não ser o endereço direto da mídia.',
+      summaryMessage,
       evidence,
       isTemporary: sigInfo.isPotentiallyTemporary,
       sanitizedUrl
@@ -350,16 +358,29 @@ export function evaluateMediaSourceValidation(params: {
 
   // 5. Acesso Negado pelo Servidor (HTTP 403/401 sem indícios de assinatura temporária e com mídia ou MIME não-HTML)
   if (source?.statusCode === 403 || source?.statusCode === 401) {
-    evidence.push(`Resposta HTTP do servidor remoto: ${source.statusCode}.`);
+    evidence.push(`Sondagem do backend: resposta HTTP ${source.statusCode}.`);
     if (source?.mimeType) {
-      evidence.push(`Content-Type declarado: "${source.mimeType}".`);
+      evidence.push(`Sondagem do backend: Content-Type declarado: "${source.mimeType}".`);
     }
-    evidence.push('A requisição direta foi recusada pelo servidor de origem.');
+    evidence.push('A requisição direta da sondagem foi recusada pelo servidor de origem.');
+
+    if (playbackState === 'error') {
+      evidence.push(
+        `Elemento de vídeo no navegador: erro registrado na reprodução${
+          playbackErrorDetail ? ` (${playbackErrorDetail})` : ''
+        }.`
+      );
+    } else if (playbackState === 'connecting') {
+      evidence.push('Elemento de vídeo no navegador: conectando ao fluxo...');
+    } else {
+      evidence.push('Elemento de vídeo no navegador: reprodução ainda não confirmada.');
+    }
+
     return {
       state: 'access_denied',
       stateLabel: '5. Acesso Negado pelo Servidor',
       badgeClass: 'bg-rose-950/40 border-rose-500/60 text-rose-300',
-      summaryMessage: `Acesso negado pelo servidor remoto (HTTP ${source.statusCode}). A requisição foi recusada pelo servidor de origem.`,
+      summaryMessage: `Acesso negado pelo servidor remoto (HTTP ${source.statusCode}) na sondagem. A requisição foi recusada pelo servidor de origem e a reprodução no navegador ainda não foi confirmada.`,
       evidence,
       isTemporary: sigInfo.isPotentiallyTemporary,
       sanitizedUrl

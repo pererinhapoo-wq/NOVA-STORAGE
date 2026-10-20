@@ -430,19 +430,6 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
           diagnostics.push(`Navegador: ${browserMsg}`);
         }
 
-        // Diagnóstico baseado em evidências concretas registradas na checagem
-        if (activeSource?.statusCode === 403) {
-          diagnostics.push('Causa confirmada: O servidor remoto recusou o acesso com código HTTP 403 Forbidden. O arquivo não possui permissão pública de leitura no armazenamento de origem.');
-        } else if (activeSource?.statusCode === 404) {
-          diagnostics.push('Causa confirmada: O servidor remoto retornou HTTP 404 Not Found (arquivo inexistente ou URL expirada).');
-        } else if (activeSource?.mimeType && !activeSource.mimeType.toLowerCase().includes('video')) {
-          diagnostics.push(`Causa confirmada: O servidor remoto retornou conteúdo "${activeSource.mimeType}" (XML/HTML) em vez de dados de vídeo binário.`);
-        } else if (activeSource?.corsSupported === false) {
-          diagnostics.push('Evidência de CORS: O servidor remoto não declarou o cabeçalho Access-Control-Allow-Origin, podendo causar bloqueio de origem cruzada no navegador.');
-        } else if (activeSource?.supportsRange === false) {
-          diagnostics.push('Evidência de Range: O servidor remoto não aceita requisições HTTP Range (206 Partial Content), essenciais para streaming de vídeo no navegador.');
-        }
-
         setPlaybackState('error');
         setPlaybackErrorDetail(diagnostics.join(' | '));
       };
@@ -463,7 +450,7 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
         videoEl.removeEventListener('error', handleVideoErr);
       };
     }
-  }, [activeSource?.url, activeSource?.format, activeSource?.statusCode, activeSource?.mimeType, activeSource?.corsSupported, activeSource?.supportsRange, destroyHls]);
+  }, [activeSource?.url, activeSource?.format, destroyHls]);
 
   return (
     <div className="p-4 sm:p-6 rounded-xl bg-neutral-900/70 border border-neutral-800/80 space-y-6">
@@ -1116,7 +1103,7 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
             <div className="p-4 rounded-xl bg-neutral-950/80 border border-neutral-800 space-y-3">
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 text-xs">
                 <div className="bg-neutral-900/60 p-2.5 rounded-lg border border-neutral-800/60">
-                  <span className="text-[10px] text-neutral-500 uppercase tracking-wider block">Status HTTP & Código</span>
+                  <span className="text-[10px] text-neutral-500 uppercase tracking-wider block">Status HTTP (Sondagem Backend)</span>
                   <span
                     className={`font-mono block mt-0.5 font-semibold ${
                       activeSource.statusCode === 200 || activeSource.statusCode === 206
@@ -1127,7 +1114,7 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
                     }`}
                   >
                     {activeSource.statusCode ? `HTTP ${activeSource.statusCode}` : 'Não avaliado'}
-                    {activeSource.statusCode === 403 && ' (Forbidden)'}
+                    {activeSource.statusCode === 403 && ' (Recusado / 403)'}
                     {activeSource.statusCode === 404 && ' (Not Found)'}
                     {activeSource.statusCode === 206 && ' (Partial Content)'}
                     {activeSource.statusCode === 200 && ' (OK)'}
