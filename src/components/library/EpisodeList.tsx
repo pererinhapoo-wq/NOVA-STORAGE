@@ -388,6 +388,12 @@ export const EpisodeList: React.FC<EpisodeListProps> = ({
                           <span>{ep.subtitleStreams.length} legenda{ep.subtitleStreams.length > 1 ? 's' : ''}</span>
                         </>
                       )}
+                      {ep.originUrl && (
+                        <>
+                          <span aria-hidden="true" className="text-neutral-600">·</span>
+                          <span className="text-cyan-400 font-medium">Origem vinculada</span>
+                        </>
+                      )}
                     </div>
                   </div>
 

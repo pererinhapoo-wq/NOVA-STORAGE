@@ -225,6 +225,9 @@ export default function App() {
     checksumSha256: string;
     audioLanguage: string;
     subtitleLanguage: string;
+    originUrl?: string;
+    originTitle?: string;
+    streamUrl?: string;
     notes?: string;
   }) => {
     const newEp = LocalCatalogService.addEpisode({
@@ -243,6 +246,10 @@ export default function App() {
       bitrateKbps: data.bitrateKbps,
       containerFormat: data.containerFormat,
       checksumSha256: data.checksumSha256,
+      originUrl: data.originUrl,
+      originTitle: data.originTitle,
+      streamUrl: data.streamUrl,
+      capturedAt: data.originUrl || data.streamUrl ? new Date().toISOString() : undefined,
       audioStreams: [
         {
           id: 'a1',
@@ -268,6 +275,12 @@ export default function App() {
     refreshData();
     setIsAddModalOpen(false);
     addToast('Episódio catalogado', `"${newEp.title}" foi registrado no catálogo com sucesso.`, 'success');
+  };
+
+  // Handler: Update Episode
+  const handleUpdateEpisode = (updated: EpisodeFile) => {
+    refreshData();
+    setSelectedEpisode(updated);
   };
 
   // Handler: Add Folder
@@ -420,6 +433,7 @@ export default function App() {
           folders={folders}
           onClose={() => setSelectedEpisode(null)}
           onDelete={handleDeleteEpisode}
+          onEdit={handleUpdateEpisode}
           onNotify={addToast}
         />
       )}

@@ -24,6 +24,9 @@ interface AddEpisodeModalProps {
     checksumSha256: string;
     audioLanguage: string;
     subtitleLanguage: string;
+    originUrl?: string;
+    originTitle?: string;
+    streamUrl?: string;
     notes?: string;
   }) => void;
 }
@@ -46,6 +49,9 @@ export const AddEpisodeModal: React.FC<AddEpisodeModalProps> = ({
   const [container, setContainer] = useState<VideoContainer>('MKV');
   const [audioLang, setAudioLang] = useState('Japonês / Português');
   const [subLang, setSubLang] = useState('Português (Brasil)');
+  const [originUrl, setOriginUrl] = useState('');
+  const [originTitle, setOriginTitle] = useState('');
+  const [streamUrl, setStreamUrl] = useState('');
   const [checksum, setChecksum] = useState('');
   const [notes, setNotes] = useState('');
 
@@ -90,6 +96,9 @@ export const AddEpisodeModal: React.FC<AddEpisodeModalProps> = ({
       checksumSha256: checksum.trim() || 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
       audioLanguage: audioLang,
       subtitleLanguage: subLang,
+      originUrl: originUrl.trim() || undefined,
+      originTitle: originTitle.trim() || undefined,
+      streamUrl: streamUrl.trim() || undefined,
       notes: notes.trim()
     });
   };
@@ -314,6 +323,53 @@ export const AddEpisodeModal: React.FC<AddEpisodeModalProps> = ({
               onChange={(e) => setChecksum(e.target.value)}
               className="w-full bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-2 text-xs text-neutral-200 font-mono"
             />
+          </div>
+
+          {/* Vínculo de Origem e Fluxo (Opcional) */}
+          <div className="p-3 rounded-lg bg-neutral-950/60 border border-neutral-800 space-y-3">
+            <span className="text-xs font-semibold text-neutral-300 block">
+              Vínculo de Origem e Fluxo de Streaming (Opcional)
+            </span>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="text-[11px] font-medium text-neutral-400 block mb-1">
+                  URL da Página de Origem (Web)
+                </label>
+                <input
+                  type="url"
+                  placeholder="https://exemplo.com/animes/ep-01"
+                  value={originUrl}
+                  onChange={(e) => setOriginUrl(e.target.value)}
+                  className="w-full bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-1.5 text-xs text-neutral-200 font-mono focus:outline-none focus:border-cyan-500"
+                />
+              </div>
+
+              <div>
+                <label className="text-[11px] font-medium text-neutral-400 block mb-1">
+                  Título da Página de Origem
+                </label>
+                <input
+                  type="text"
+                  placeholder="Ex: Assistir Online Full HD"
+                  value={originTitle}
+                  onChange={(e) => setOriginTitle(e.target.value)}
+                  className="w-full bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-1.5 text-xs text-neutral-200 focus:outline-none focus:border-cyan-500"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="text-[11px] font-medium text-neutral-400 block mb-1">
+                URL Direta de Reprodução (Stream Direto / Capturada por Sniffer)
+              </label>
+              <input
+                type="url"
+                placeholder="https://cdn.exemplo.com/hls/master.m3u8?token=..."
+                value={streamUrl}
+                onChange={(e) => setStreamUrl(e.target.value)}
+                className="w-full bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-1.5 text-xs text-neutral-200 font-mono focus:outline-none focus:border-cyan-500"
+              />
+            </div>
           </div>
 
           {/* Observações */}
