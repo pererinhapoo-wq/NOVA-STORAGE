@@ -105,26 +105,206 @@ function resolveUrlSafe(src: string, baseUrl: string): string | null {
  * Infere o formato da mídia a partir da extensão da URL ou MIME type
  */
 export function inferMediaFormat(url: string, mimeType?: string): MediaFormat {
-  const lowerUrl = url.toLowerCase();
   const lowerMime = (mimeType || '').toLowerCase();
 
   if (
-    lowerUrl.includes('.m3u8') ||
     lowerMime.includes('application/x-mpegurl') ||
     lowerMime.includes('vnd.apple.mpegurl')
   ) {
     return 'HLS';
   }
 
-  if (lowerUrl.includes('.mp4') || lowerMime.includes('video/mp4')) {
+  if (lowerMime.includes('video/mp4')) {
     return 'MP4';
   }
 
-  if (lowerUrl.includes('.webm') || lowerMime.includes('video/webm')) {
+  if (lowerMime.includes('video/webm')) {
+    return 'WEBM';
+  }
+
+  let pathToCheck = url.toLowerCase();
+  try {
+    const parsed = new URL(url);
+    pathToCheck = parsed.pathname.toLowerCase();
+  } catch {
+    // Para URLs relativas ou caminhos locais sem protocolo/base
+  }
+
+  if (pathToCheck.includes('.m3u8')) {
+    return 'HLS';
+  }
+
+  if (pathToCheck.includes('.mp4')) {
+    return 'MP4';
+  }
+
+  if (pathToCheck.includes('.webm')) {
     return 'WEBM';
   }
 
   return 'UNKNOWN';
+}
+
+/**
+ * Regra controlada para identificação de provedores e rotas intermediárias de fluxo
+ */
+export interface IntermediateUrlRule {
+  id: string;
+  name: string;
+  matches: (url: URL) => boolean;
+  targetParam: string;
+}
+
+export const INTERMEDIATE_URL_RULES: IntermediateUrlRule[] = [
+  {
+    id: 'anivideo_videohls',
+    name: 'AniVideo Gateway',
+    matches: (url: URL) => {
+      const host = url.hostname.toLowerCase();
+      return host === 'api.anivideo.net' || host === 'anivideo.net' || host.endsWith('.anivideo.net');
+    },
+    targetParam: 'd'
+  },
+  {
+    id: 'generic_videohls_endpoint',
+    name: 'Endpoint Intermediário de Vídeo HLS',
+    matches: (url: URL) => {
+      const path = url.pathname.toLowerCase();
+      return (
+        path.endsWith('/videohls.php') ||
+        path.endsWith('/videohls') ||
+        path.endsWith('/video_hls.php') ||
+        path.endsWith('/playerhls.php') ||
+        path.endsWith('/hlsplayer.php')
+      );
+    },
+    targetParam: 'd'
+  }
+];
+
+export function registerIntermediateUrlRule(rule: IntermediateUrlRule): void {
+  const existingIdx = INTERMEDIATE_URL_RULES.findIndex(r => r.id === rule.id);
+  if (existingIdx >= 0) {
+    INTERMEDIATE_URL_RULES[existingIdx] = rule;
+  } else {
+    INTERMEDIATE_URL_RULES.push(rule);
+  }
+}
+
+export function findMatchingIntermediateRule(
+  url: URL,
+  customRules?: IntermediateUrlRule[]
+): IntermediateUrlRule | undefined {
+  const rules = customRules || INTERMEDIATE_URL_RULES;
+  return rules.find(r => r.matches(url));
+}
+
+export type IntermediateExtractionResult =
+  | {
+      isIntermediate: true;
+      valid: true;
+      targetUrl: string;
+      targetFormat: MediaFormat;
+      rule: IntermediateUrlRule;
+    }
+  | {
+      isIntermediate: true;
+      valid: false;
+      error: string;
+      code:
+        | 'MISSING_INTERMEDIATE_PARAM'
+        | 'EMPTY_INTERMEDIATE_PARAM'
+        | 'INVALID_INTERMEDIATE_URL'
+        | 'INVALID_PROTOCOL'
+        | 'UNSUPPORTED_MEDIA_FORMAT';
+      rule: IntermediateUrlRule;
+    }
+  | {
+      isIntermediate: false;
+    };
+
+/**
+ * Identifica URLs intermediárias por meio de parsing estruturado da URL,
+ * decodifica parâmetros configurados como "d", valida se contém URL HTTP/HTTPS válida
+ * e preserva parâmetros e codificação original sem decodificação dupla.
+ */
+export function extractIntermediateMediaDestination(
+  rawUrl: string,
+  customRules?: IntermediateUrlRule[]
+): IntermediateExtractionResult {
+  const trimmed = (rawUrl || '').trim();
+  if (!trimmed) {
+    return { isIntermediate: false };
+  }
+
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(trimmed);
+  } catch {
+    return { isIntermediate: false };
+  }
+
+  const rule = findMatchingIntermediateRule(parsedUrl, customRules);
+  if (!rule) {
+    return { isIntermediate: false };
+  }
+
+  const paramName = rule.targetParam;
+  if (!parsedUrl.searchParams.has(paramName)) {
+    return {
+      isIntermediate: true,
+      valid: false,
+      error: `A URL intermediária (${rule.name}) requer o parâmetro "${paramName}" com a URL de destino.`,
+      code: 'MISSING_INTERMEDIATE_PARAM',
+      rule
+    };
+  }
+
+  const rawTarget = parsedUrl.searchParams.get(paramName);
+  if (!rawTarget || !rawTarget.trim()) {
+    return {
+      isIntermediate: true,
+      valid: false,
+      error: `O parâmetro "${paramName}" da URL intermediária está vazio.`,
+      code: 'EMPTY_INTERMEDIATE_PARAM',
+      rule
+    };
+  }
+
+  const trimmedTarget = rawTarget.trim();
+
+  let targetObj: URL;
+  try {
+    targetObj = new URL(trimmedTarget);
+  } catch {
+    return {
+      isIntermediate: true,
+      valid: false,
+      error: `O parâmetro "${paramName}" contém uma URL de destino com formato sintático inválido.`,
+      code: 'INVALID_INTERMEDIATE_URL',
+      rule
+    };
+  }
+
+  if (targetObj.protocol !== 'http:' && targetObj.protocol !== 'https:') {
+    return {
+      isIntermediate: true,
+      valid: false,
+      error: `Protocolo "${targetObj.protocol}" no parâmetro "${paramName}" não é permitido. Apenas HTTP e HTTPS são aceitos.`,
+      code: 'INVALID_PROTOCOL',
+      rule
+    };
+  }
+
+  const targetFormat = inferMediaFormat(trimmedTarget);
+
+  return {
+    isIntermediate: true,
+    valid: true,
+    targetUrl: trimmedTarget,
+    targetFormat,
+    rule
+  };
 }
 
 /**
@@ -808,9 +988,13 @@ export async function extractMediaFromHtml(
 }
 
 /**
- * Testa de forma segura e não intrusiva a acessibilidade e cabeçalhos CORS de uma URL de mídia
+ * Testa de forma segura e não intrusiva a acessibilidade e cabeçalhos CORS de uma URL de mídia,
+ * com validação SSRF estrita na URL inicial e em cada salto de redirecionamento.
  */
-export async function probeMediaAccessibility(mediaUrl: string): Promise<{
+export async function probeMediaAccessibility(
+  mediaUrl: string,
+  options?: { maxRedirects?: number; timeoutMs?: number }
+): Promise<{
   accessible: boolean;
   corsSupported: boolean;
   statusCode?: number;
@@ -818,71 +1002,106 @@ export async function probeMediaAccessibility(mediaUrl: string): Promise<{
   mimeType?: string;
   supportsRange?: boolean;
   notes?: string;
+  finalUrl?: string;
 }> {
-  // 1. Validação SSRF rigorosa do endpoint de mídia antes de conectar
-  const ssrfCheck = await validateUrlForSsrf(mediaUrl);
-  if (!ssrfCheck.valid) {
-    return {
-      accessible: false,
-      corsSupported: false,
-      notes: `Acesso à mídia bloqueado por política de segurança SSRF: ${ssrfCheck.error}`
-    };
-  }
+  const maxRedirects = options?.maxRedirects ?? 3;
+  const timeoutMs = options?.timeoutMs ?? 4000;
 
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 4000); // 4s timeout
+  let currentUrl = mediaUrl;
+  let redirectCount = 0;
 
-  try {
-    // Tenta uma requisição GET com cabeçalho de alcance curto (Range: bytes=0-1024) para testar 206 Partial Content
-    const response = await fetch(mediaUrl, {
-      method: 'GET',
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 NOVA-STORAGE-Inspector/1.0',
-        'Range': 'bytes=0-1024',
-        'Origin': 'https://ais-dev-4wcm7llj3mzvxq3xdjjq3o-46161797005.us-east1.run.app'
-      },
-      signal: controller.signal
-    });
-
-    clearTimeout(timeoutId);
-
-    const corsHeader = response.headers.get('access-control-allow-origin');
-    const corsSupported = typeof corsHeader === 'string' && corsHeader.length > 0;
-    const accessible = response.status >= 200 && response.status < 400;
-    const contentLength = response.headers.get('content-length');
-    const mimeType = response.headers.get('content-type') || undefined;
-    const acceptRanges = response.headers.get('accept-ranges');
-    const contentRange = response.headers.get('content-range');
-    const supportsRange = response.status === 206 || acceptRanges === 'bytes' || Boolean(contentRange);
-
-    let notes = '';
-    if (response.status === 403) {
-      notes = `Acesso negado (HTTP 403 Forbidden). O arquivo é privado ou o servidor recusou a requisição anônima (Content-Type: ${mimeType || 'desconhecido'}).`;
-    } else if (response.status === 404) {
-      notes = 'Arquivo não encontrado (HTTP 404 Not Found). O link de mídia pode estar expirado ou inativo.';
-    } else if (accessible) {
-      const rangeText = supportsRange ? 'Suporta Range (206 Partial Content)' : 'Sem Range parcial explícito';
-      const corsText = corsSupported ? 'CORS Habilitado' : 'Sem CORS Declarado';
-      notes = `HTTP ${response.status} (${mimeType || 'mídia'}) · ${rangeText} · ${corsText}.`;
-    } else {
-      notes = `Servidor respondeu com código HTTP ${response.status}.`;
+  while (redirectCount <= maxRedirects) {
+    // 1. Validação SSRF rigorosa do endpoint de mídia antes de conectar em cada salto
+    const ssrfCheck = await validateUrlForSsrf(currentUrl);
+    if (!ssrfCheck.valid) {
+      return {
+        accessible: false,
+        corsSupported: false,
+        notes: `Acesso à mídia bloqueado por política de segurança SSRF: ${ssrfCheck.error}`
+      };
     }
 
-    return {
-      accessible,
-      corsSupported,
-      statusCode: response.status,
-      contentLengthBytes: contentLength ? parseInt(contentLength, 10) : undefined,
-      mimeType,
-      supportsRange,
-      notes
-    };
-  } catch (err: any) {
-    clearTimeout(timeoutId);
-    return {
-      accessible: false,
-      corsSupported: false,
-      notes: `Não foi possível conectar à fonte de mídia: ${err?.message || 'Erro de rede'}`
-    };
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      // Tenta uma requisição GET com cabeçalho de alcance curto (Range: bytes=0-1024) para testar 206 Partial Content
+      // Usamos redirect: 'manual' para impedir desvios de SSRF via redirecionamentos para IPs privados ou metadados
+      const response = await fetch(currentUrl, {
+        method: 'GET',
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 NOVA-STORAGE-Inspector/1.0',
+          'Range': 'bytes=0-1024',
+          'Origin': 'https://ais-dev-4wcm7llj3mzvxq3xdjjq3o-46161797005.us-east1.run.app'
+        },
+        redirect: 'manual',
+        signal: controller.signal
+      });
+
+      clearTimeout(timeoutId);
+
+      // Trata redirecionamentos manuais com validação SSRF no próximo salto
+      if ([301, 302, 303, 307, 308].includes(response.status)) {
+        const location = response.headers.get('location');
+        if (!location) {
+          return {
+            accessible: false,
+            corsSupported: false,
+            statusCode: response.status,
+            notes: 'Redirecionamento recebido sem cabeçalho Location.'
+          };
+        }
+
+        currentUrl = new URL(location, currentUrl).toString();
+        redirectCount++;
+        continue;
+      }
+
+      const corsHeader = response.headers.get('access-control-allow-origin');
+      const corsSupported = typeof corsHeader === 'string' && corsHeader.length > 0;
+      const accessible = response.status >= 200 && response.status < 400;
+      const contentLength = response.headers.get('content-length');
+      const mimeType = response.headers.get('content-type') || undefined;
+      const acceptRanges = response.headers.get('accept-ranges');
+      const contentRange = response.headers.get('content-range');
+      const supportsRange = response.status === 206 || acceptRanges === 'bytes' || Boolean(contentRange);
+
+      let notes = '';
+      if (response.status === 403) {
+        notes = `Acesso negado (HTTP 403 Forbidden). O arquivo é privado ou o servidor recusou a requisição anônima (Content-Type: ${mimeType || 'desconhecido'}).`;
+      } else if (response.status === 404) {
+        notes = 'Arquivo não encontrado (HTTP 404 Not Found). O link de mídia pode estar expirado ou inativo.';
+      } else if (accessible) {
+        const rangeText = supportsRange ? 'Suporta Range (206 Partial Content)' : 'Sem Range parcial explícito';
+        const corsText = corsSupported ? 'CORS Habilitado' : 'Sem CORS Declarado';
+        notes = `HTTP ${response.status} (${mimeType || 'mídia'}) · ${rangeText} · ${corsText}.`;
+      } else {
+        notes = `Servidor respondeu com código HTTP ${response.status}.`;
+      }
+
+      return {
+        accessible,
+        corsSupported,
+        statusCode: response.status,
+        contentLengthBytes: contentLength ? parseInt(contentLength, 10) : undefined,
+        mimeType,
+        supportsRange,
+        notes,
+        finalUrl: currentUrl
+      };
+    } catch (err: any) {
+      clearTimeout(timeoutId);
+      return {
+        accessible: false,
+        corsSupported: false,
+        notes: `Não foi possível conectar à fonte de mídia: ${err?.message || 'Erro de rede'}`
+      };
+    }
   }
+
+  return {
+    accessible: false,
+    corsSupported: false,
+    notes: `Limite máximo de ${maxRedirects} redirecionamentos excedido.`
+  };
 }

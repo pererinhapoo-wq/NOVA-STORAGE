@@ -9,6 +9,7 @@ import {
   probeMediaAccessibility,
   inferMediaFormat,
   determineInspectionStatus,
+  extractIntermediateMediaDestination,
   PageInspectionResult,
   ExtractedMediaSource
 } from '../services/pageMediaExtractor.ts';
@@ -50,6 +51,95 @@ mediaInspectRouter.post('/inspect-page', async (req, res) => {
   }
 
   try {
+    // 2.5 Reconhecimento e extração controlada de URLs intermediárias (ex: api.anivideo.net/videohls.php?d=...)
+    const intermediateCheck = extractIntermediateMediaDestination(trimmedUrl);
+    if (intermediateCheck.isIntermediate) {
+      if (!intermediateCheck.valid) {
+        return res.status(400).json({
+          success: false,
+          error: intermediateCheck.error,
+          code: intermediateCheck.code
+        });
+      }
+
+      const targetUrl = intermediateCheck.targetUrl;
+
+      // Validação SSRF estrita do destino extraído antes de qualquer requisição
+      const targetSsrfCheck = await validateUrlForSsrf(targetUrl);
+      if (!targetSsrfCheck.valid) {
+        return res.status(400).json({
+          success: false,
+          error: targetSsrfCheck.error || 'O destino da URL intermediária foi bloqueado pela política de proteção SSRF.',
+          code: 'SSRF_BLOCKED'
+        });
+      }
+
+      // Sondagem direta da fonte de mídia extraída (com proteção SSRF também em redirecionamentos)
+      const probe = await probeMediaAccessibility(targetUrl);
+      const resolvedFormat =
+        intermediateCheck.targetFormat !== 'UNKNOWN'
+          ? intermediateCheck.targetFormat
+          : inferMediaFormat(targetUrl, probe.mimeType);
+
+      if (resolvedFormat === 'UNKNOWN') {
+        return res.status(400).json({
+          success: false,
+          error: 'O endereço de destino extraído do parâmetro da URL intermediária não corresponde a um formato de mídia suportado (.m3u8 ou .mp4).',
+          code: 'UNSUPPORTED_MEDIA_FORMAT'
+        });
+      }
+
+      const directSource: ExtractedMediaSource = {
+        url: targetUrl, // Preserva a URL de mídia real e completa
+        format: resolvedFormat,
+        mimeType: probe.mimeType,
+        discoveryMethod: 'direct_stream',
+        corsSupported: probe.corsSupported,
+        accessible: probe.accessible,
+        contentLengthBytes: probe.contentLengthBytes,
+        statusCode: probe.statusCode,
+        supportsRange: probe.supportsRange,
+        notes: probe.notes || `Fonte extraída do parâmetro "${intermediateCheck.rule.targetParam}" da URL intermediária (${intermediateCheck.rule.name}).`
+      };
+
+      let summaryMessage = '';
+      if (probe.accessible) {
+        summaryMessage = probe.corsSupported
+          ? `Fonte de stream extraída da URL intermediária e acessível (HTTP ${probe.statusCode || 200}${probe.supportsRange ? ' · Range 206 Ativo' : ''} · CORS Ativo).`
+          : `Fonte de stream extraída da URL intermediária (HTTP ${probe.statusCode || 200}), mas sem cabeçalhos CORS declarados.`;
+      } else {
+        if (probe.statusCode === 404) {
+          summaryMessage = 'O destino de mídia extraído não foi encontrado no servidor remoto (HTTP 404 Not Found). O link de stream pode estar expirado ou inativo.';
+        } else if (probe.statusCode === 403) {
+          summaryMessage = 'O servidor remoto recusou o acesso ao destino de mídia extraído (HTTP 403 Forbidden).';
+        } else {
+          summaryMessage = `O servidor remoto da mídia recusou o acesso direto (HTTP ${probe.statusCode || 'Inacessível'}). ${probe.notes || ''}`;
+        }
+      }
+
+      const result: PageInspectionResult = {
+        pageUrl: trimmedUrl,
+        pageTitle: `Fluxo Extraído de URL Intermediária (${resolvedFormat})`,
+        sourcesFound: [directSource],
+        detectedIframes: [],
+        dynamicMediaIndicators: [],
+        diagnostics: {
+          fetchTimeMs: Date.now() - startTime,
+          responseSizeBytes: 0,
+          redirectCount: 0,
+          detectedDrm: false,
+          detectedProtectionOrCaptcha: false,
+          detectedIframesCount: 0,
+          detectedDynamicLoading: false,
+          httpStatusCode: probe.statusCode,
+          status: probe.accessible ? 'direct_source_accessible' : 'error',
+          summaryMessage
+        }
+      };
+
+      return res.json({ success: true, result });
+    }
+
     // 3. Caso especial: O usuário forneceu diretamente um link de stream (.m3u8 ou .mp4)
     const directFormat = inferMediaFormat(trimmedUrl);
     if (directFormat !== 'UNKNOWN') {
