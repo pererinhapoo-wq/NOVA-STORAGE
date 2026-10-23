@@ -52,6 +52,10 @@ export interface EpisodeFile {
   catalogedAt: string; // ISO 8601
   lastVerifiedAt: string;
   streamUrl?: string;
+  originUrl?: string;
+  originTitle?: string;
+  capturedAt?: string;
+  streamUrlExpiresAt?: string | null;
   sourceType?: 'direct_url' | 'google_drive' | 'local_file';
   notes?: string;
 }

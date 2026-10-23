@@ -46,4 +46,14 @@ test('Bookmarklet Detector de Mídia para Navegadores Móveis (Brave Android)', 
     assert.ok(BRAVE_BOOKMARKLET_STEPS[2].instruction.toLowerCase().includes('editar'));
     assert.ok(BRAVE_BOOKMARKLET_STEPS[3].instruction.toLowerCase().includes('play'));
   });
+
+  await t.test('7. Preserva metadados de origem (originUrl, originTitle, capturedAt) e ação de cópia estruturada', () => {
+    assert.ok(BOOKMARKLET_MINIFIED_CODE.includes('originUrl'));
+    assert.ok(BOOKMARKLET_MINIFIED_CODE.includes('originTitle'));
+    assert.ok(BOOKMARKLET_MINIFIED_CODE.includes('capturedAt'));
+    assert.ok(BOOKMARKLET_MINIFIED_CODE.includes('window.location.href'));
+    assert.ok(BOOKMARKLET_MINIFIED_CODE.includes('+ Origem'));
+    assert.ok(BOOKMARKLET_MINIFIED_CODE.includes('ns-cpy-meta'));
+  });
 });
+

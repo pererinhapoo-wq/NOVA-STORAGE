@@ -494,6 +494,23 @@ export class LocalCatalogService {
   }
 
   /**
+   * Atualiza com segurança a URL do fluxo e os metadados de origem de um episódio
+   * Preserva todos os demais dados intactos e sem migrações destrutivas.
+   */
+  static updateEpisodeStreamOrigin(
+    id: string,
+    streamData: {
+      streamUrl?: string;
+      originUrl?: string;
+      originTitle?: string;
+      capturedAt?: string;
+      streamUrlExpiresAt?: string | null;
+    }
+  ): EpisodeFile | null {
+    return this.updateEpisode(id, streamData);
+  }
+
+  /**
    * Delete an episode
    */
   static deleteEpisode(id: string): boolean {
