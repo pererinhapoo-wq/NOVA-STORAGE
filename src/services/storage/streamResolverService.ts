@@ -3,15 +3,16 @@ import {
   ExternalMediaService,
   InspectApiResponse,
   PageInspectionResult,
-  TemporaryUrlSignatureInfo
+  TemporaryUrlSignatureInfo,
+  sanitizeMediaUrlForDisplay
 } from './externalMediaService.ts';
 import { EpisodeFile } from '../../types/storage.ts';
 
 /**
  * Estratégia de resolução para o link do episódio:
- * - direct_usable: Link direto ainda utilizável com evidência suficiente (não expirado ou estável).
- * - auto_renewable: Renovação automática possível por uma fonte autorizada/pública acessível.
- * - assisted_renewal_required: Renovação assistida necessária (iframe, carregamento dinâmico, anti-bot, sem garantia de reprodução direta).
+ * - direct_usable: Link direto acessível na verificação atual ou utilizável sem expiração evidente.
+ * - auto_renewable: Renovação automática possível por uma fonte autorizada/pública acessível na origem.
+ * - assisted_renewal_required: Renovação assistida necessária (link inacessível/expirado sem auto-renovação, iframe, dinâmico ou anti-bot).
  * - origin_unavailable: Origem indisponível, bloqueada por SSRF, protegida por DRM ou inacessível.
  * - inconclusive: Falha de validação, erro de rede, timeout ou ausência de dados para tomada de decisão.
  */
@@ -40,9 +41,21 @@ export interface ResolveStreamInput {
    */
   forceOriginInspection?: boolean;
   /**
+   * Executar verificação de rede da acessibilidade da streamUrl atual
+   */
+  probeCurrentStream?: boolean;
+  /**
    * Injetor opcional de inspetor de página para testes unitários ou requisições customizadas
    */
   pageInspector?: (url: string) => Promise<InspectApiResponse>;
+  /**
+   * Injetor opcional de probe para a streamUrl
+   */
+  streamProbe?: (url: string) => Promise<InspectApiResponse>;
+  /**
+   * Instante temporal simulado para testes unitários e verificação determinística
+   */
+  now?: number | Date;
 }
 
 export interface StreamResolutionResult {
@@ -90,11 +103,11 @@ export class StreamResolverService {
   /**
    * Avalia a assinatura temporal de uma URL de mídia
    */
-  static evaluateSignature(streamUrl?: string): TemporaryUrlSignatureInfo {
+  static evaluateSignature(streamUrl?: string, now?: number | Date): TemporaryUrlSignatureInfo {
     if (!streamUrl) {
       return { isPotentiallyTemporary: false, detectedParameters: [] };
     }
-    return detectTemporaryUrlSignature(streamUrl);
+    return detectTemporaryUrlSignature(streamUrl, now);
   }
 
   /**
@@ -131,7 +144,10 @@ export class StreamResolverService {
     episode: Partial<EpisodeFile>,
     options?: {
       forceOriginInspection?: boolean;
+      probeCurrentStream?: boolean;
       pageInspector?: (url: string) => Promise<InspectApiResponse>;
+      streamProbe?: (url: string) => Promise<InspectApiResponse>;
+      now?: number | Date;
     }
   ): Promise<StreamResolutionResult> {
     return this.resolveStream({
@@ -141,7 +157,10 @@ export class StreamResolverService {
       capturedAt: episode.capturedAt,
       streamUrlExpiresAt: episode.streamUrlExpiresAt,
       forceOriginInspection: options?.forceOriginInspection,
-      pageInspector: options?.pageInspector
+      probeCurrentStream: options?.probeCurrentStream,
+      pageInspector: options?.pageInspector,
+      streamProbe: options?.streamProbe,
+      now: options?.now
     });
   }
 
@@ -169,9 +188,9 @@ export class StreamResolverService {
     }
 
     // 2. Análise da assinatura e parâmetros temporais do link atual (se presente)
-    const sigInfo = streamUrl ? this.evaluateSignature(streamUrl) : undefined;
+    const sigInfo = streamUrl ? this.evaluateSignature(streamUrl, input.now) : undefined;
     const isTemporary = Boolean(sigInfo?.isPotentiallyTemporary);
-    const isExpired = sigInfo?.isProbablyExpired;
+    const isExpiredByTimestamp = sigInfo?.isProbablyExpired === true;
     const expirationTimestamp = sigInfo?.expirationTimestamp;
     const formattedExpiration = this.formatExpirationDate(expirationTimestamp);
 
@@ -182,13 +201,14 @@ export class StreamResolverService {
           details.push(`Carimbo de expiração: ${formattedExpiration || expirationTimestamp}.`);
         }
       } else {
-        details.push('Nenhum parâmetro de assinatura temporária conhecido foi detectado na URL direta.');
+        // Princípio: ausência de parâmetros de expiração NÃO significa que o link seja permanente/perene
+        details.push('Nenhum parâmetro de expiração temporal explícito foi detectado na URL direta (validade futura indeterminada).');
       }
     }
 
-    // 3. Caso em que o link direto existe e NÃO há página de origem
-    if (streamUrl && !originUrl) {
-      if (isExpired === true) {
+    // 3. Caso em que o link possui timestamp de expiração comprovadamente no passado
+    if (streamUrl && isExpiredByTimestamp) {
+      if (!originUrl) {
         return {
           strategy: 'inconclusive',
           status: 'inconclusive',
@@ -198,7 +218,7 @@ export class StreamResolverService {
           summaryMessage: 'O link atual possui assinatura temporária expirada e não há página de origem cadastrada para renovação.',
           details: [
             ...details,
-            'Sem a página de origem, a renovação automatizada não é possível.',
+            'Sem a página de origem, a renovação automatizada não é viável.',
             'Utilize o NOVA Sniffer no navegador para capturar uma nova URL e cadastrar a página de origem.'
           ],
           currentStreamUrl: streamUrl,
@@ -209,36 +229,184 @@ export class StreamResolverService {
           signatureInfo: sigInfo
         };
       }
-
-      // Link direto não expirado ou perene
-      const msg = isTemporary
-        ? 'Link direto com assinatura temporária aparentemente válida, porém sem página de origem cadastrada para renovação futura.'
-        : 'Link direto aparentemente perene, sem parâmetros temporários detectados.';
-
-      return {
-        strategy: 'direct_usable',
-        status: 'usable',
-        canDirectPlay: true,
-        canAutoRenew: false,
-        requiresSniffer: false,
-        summaryMessage: msg,
-        details,
-        currentStreamUrl: streamUrl,
-        isTemporary,
-        isExpired: false,
-        expirationTimestamp,
-        formattedExpirationDate: formattedExpiration,
-        signatureInfo: sigInfo
-      };
+      // Se possui originUrl, avança para inspeção da origem (seção 5)
+      details.push('Timestamp no passado detectado na URL de stream. Iniciando consulta na página de origem cadastrada.');
     }
 
-    // 4. Se o link direto existe, não está expirado e NÃO foi forçada a inspeção de origem:
-    // O link atual ainda pode ser reproduzido com segurança.
-    const isDirectUsable = streamUrl && isExpired !== true;
-    if (isDirectUsable && !input.forceOriginInspection) {
+    // 4. Sondagem de Rede da streamUrl (quando solicitado por probeCurrentStream ou quando streamProbe for fornecido)
+    const shouldProbeStream = streamUrl && !isExpiredByTimestamp && !input.forceOriginInspection && (Boolean(input.probeCurrentStream) || Boolean(input.streamProbe));
+    let streamProbeStatus: number | undefined;
+
+    if (shouldProbeStream) {
+      details.push(`Sondando acessibilidade da URL de stream atual: ${sanitizeMediaUrlForDisplay(streamUrl)}`);
+      const prober = input.streamProbe || input.pageInspector || ExternalMediaService.inspectPage;
+      let probeRes: InspectApiResponse | null = null;
+      let probeError: any = null;
+
+      try {
+        probeRes = await prober(streamUrl);
+      } catch (err: any) {
+        probeError = err;
+      }
+
+      // 4.1. Falha por timeout, erro de conexão ou CORS na sondagem
+      const isTimeout =
+        probeRes?.code === 'TIMEOUT' ||
+        (probeError && (probeError.name === 'AbortError' || String(probeError.message).toLowerCase().includes('timeout')));
+
+      if (isTimeout || (probeError && !probeRes)) {
+        return {
+          strategy: 'inconclusive',
+          status: 'inconclusive',
+          canDirectPlay: false,
+          canAutoRenew: Boolean(originUrl),
+          requiresSniffer: false,
+          summaryMessage: 'Falha de comunicação ou tempo limite ao sondar a URL de stream. Não é possível confirmar a acessibilidade do fluxo nem declarar que expirou.',
+          details: [
+            ...details,
+            `Erro de rede na sondagem: ${probeError?.message || probeRes?.error || 'Tempo limite de conexão excedido'}.`,
+            'Resultado inconclusivo: sem confirmação técnica de bloqueio ou expiração definitiva.'
+          ],
+          currentStreamUrl: streamUrl,
+          originUrl,
+          isTemporary,
+          isExpired: false,
+          expirationTimestamp,
+          formattedExpirationDate: formattedExpiration,
+          signatureInfo: sigInfo
+        };
+      }
+
+      // 4.2. Bloqueio por política SSRF no stream
+      if (probeRes && !probeRes.success && probeRes.code === 'SSRF_BLOCKED') {
+        return {
+          strategy: 'origin_unavailable',
+          status: 'unavailable',
+          canDirectPlay: false,
+          canAutoRenew: false,
+          requiresSniffer: false,
+          summaryMessage: 'Acesso à URL de stream recusado pelas diretrizes de segurança contra SSRF (endereço local ou restrito).',
+          details: [...details, `Bloqueio de segurança SSRF: ${probeRes.error || 'Endereço privado ou loopback'}`],
+          currentStreamUrl: streamUrl,
+          originUrl,
+          isTemporary,
+          isExpired: false,
+          expirationTimestamp,
+          formattedExpirationDate: formattedExpiration,
+          signatureInfo: sigInfo
+        };
+      }
+
+      // Avaliação da resposta obtida na sondagem do stream
+      const streamSource = probeRes?.result?.sourcesFound?.[0];
+      const httpCode = streamSource?.statusCode ?? probeRes?.result?.diagnostics?.httpStatusCode;
+      streamProbeStatus = httpCode;
+      const isAccessible = streamSource?.accessible === true || (typeof httpCode === 'number' && httpCode >= 200 && httpCode < 400);
+
+      // 4.3. HTTP 200/206: Acessível na sondagem atual; duração futura desconhecida
+      if (isAccessible) {
+        const codeText = httpCode ? `HTTP ${httpCode}` : 'HTTP 200/206';
+        const rangeText = streamSource?.supportsRange ? ' (Suporte a Range 206 ativo)' : '';
+        const corsText = streamSource?.corsSupported ? ' · CORS ativo' : '';
+
+        const validityMsg = isTemporary
+          ? `Assinatura temporária declarada com validade estimada até ${formattedExpiration || 'o término do prazo'}.`
+          : 'Duração futura desconhecida — a URL não declara parâmetros de expiração (links de streaming podem expirar por sessão ou token de CDN sem aviso prévio).';
+
+        const summaryMsg = isTemporary
+          ? `Link direto ativo e acessível na sondagem atual (${codeText}${rangeText}${corsText}). Validade estimada até ${formattedExpiration || 'o término do prazo'}.`
+          : `Link direto acessível na sondagem atual (${codeText}${rangeText}${corsText}). Duração futura desconhecida (validade não declarada na URL).`;
+
+        return {
+          strategy: 'direct_usable',
+          status: 'usable',
+          canDirectPlay: true,
+          canAutoRenew: Boolean(originUrl),
+          requiresSniffer: false,
+          summaryMessage: summaryMsg,
+          details: [
+            ...details,
+            `Sondagem do servidor: ${codeText}${rangeText}${corsText}.`,
+            validityMsg,
+            originUrl
+              ? `Página de origem disponível (${originUrl}) para renovação sob demanda caso o link expire.`
+              : 'Sem página de origem vinculada para renovação automática futura.'
+          ],
+          currentStreamUrl: streamUrl,
+          isTemporary,
+          isExpired: false,
+          expirationTimestamp,
+          formattedExpirationDate: formattedExpiration,
+          originUrl,
+          originTitle: input.originTitle,
+          capturedAt: input.capturedAt,
+          streamUrlExpiresAt: input.streamUrlExpiresAt,
+          signatureInfo: sigInfo
+        };
+      }
+
+      // 4.4. HTTP 401/403/404/410: Inacessível ou possivelmente expirado (não afirmar expiração definitiva apenas pelo status)
+      const isDeniedOrInactive = (typeof httpCode === 'number' && [401, 403, 404, 410].includes(httpCode)) || streamSource?.accessible === false;
+      if (isDeniedOrInactive) {
+        const deniedCode = httpCode ? `HTTP ${httpCode}` : 'HTTP 403';
+        details.push(`Sondagem do link direto retornou ${deniedCode}: o fluxo está inacessível no momento e pode ter expirado ou estar restrito por token/sessão.`);
+
+        if (!originUrl) {
+          return {
+            strategy: 'assisted_renewal_required',
+            status: 'assisted',
+            canDirectPlay: false,
+            canAutoRenew: false,
+            requiresSniffer: true,
+            summaryMessage: `O link direto atual está inacessível ou possivelmente expirado (${deniedCode}) e não há página de origem cadastrada. Capture uma nova URL utilizando o NOVA Sniffer no navegador.`,
+            details: [
+              ...details,
+              'Sem a página de origem vinculada, a renovação automatizada não é viável.',
+              'Abra o vídeo no navegador e utilize o NOVA Sniffer para capturar uma nova URL de stream ativa.'
+            ],
+            currentStreamUrl: streamUrl,
+            isTemporary,
+            isExpired: true,
+            expirationTimestamp,
+            formattedExpirationDate: formattedExpiration,
+            signatureInfo: sigInfo
+          };
+        }
+
+        details.push(`Link atual inacessível. Tentando obter nova URL a partir da página de origem cadastrada: ${originUrl}`);
+        // Continua para o passo 5 (inspeção da página de origem)
+      }
+    }
+
+    // 4.5. Avaliação estática quando não foi executada a sondagem de rede do stream
+    // (ex.: avaliação inicial sem clique no botão ou quando forceOriginInspection não está ativo)
+    if (streamUrl && !isExpiredByTimestamp && !input.forceOriginInspection && !shouldProbeStream) {
+      if (!originUrl) {
+        const msg = isTemporary
+          ? 'Link direto com assinatura temporária aparentemente válida, porém sem página de origem cadastrada para renovação futura.'
+          : 'Link direto cadastrado sem parâmetros de expiração na URL (validade futura desconhecida, ainda não verificado na rede).';
+
+        return {
+          strategy: 'direct_usable',
+          status: 'usable',
+          canDirectPlay: true,
+          canAutoRenew: false,
+          requiresSniffer: false,
+          summaryMessage: msg,
+          details,
+          currentStreamUrl: streamUrl,
+          isTemporary,
+          isExpired: false,
+          expirationTimestamp,
+          formattedExpirationDate: formattedExpiration,
+          signatureInfo: sigInfo
+        };
+      }
+
+      // Link direto existe e há originUrl, sem inspeção forçada nem probe solicitado
       const msg = isTemporary
-        ? `Link direto ativo com assinatura temporária válida até ${formattedExpiration || 'o término do prazo'}. Página de origem registrada para renovação futura.`
-        : 'Link direto utilizável e página de origem preservada.';
+        ? `Link direto com assinatura temporária válida até ${formattedExpiration || 'o término do prazo'}. Página de origem registrada para renovação futura.`
+        : 'Link direto cadastrado sem parâmetros de expiração na URL (validade futura desconhecida, ainda não verificado na rede). Página de origem preservada.';
 
       return {
         strategy: 'direct_usable',
@@ -250,7 +418,7 @@ export class StreamResolverService {
         details: [
           ...details,
           `Página de origem disponível: ${originUrl}`,
-          'Renovação sob demanda disponível caso o link expire.'
+          'Clique em "Verificar ou Renovar Link" para sondar a acessibilidade na rede.'
         ],
         currentStreamUrl: streamUrl,
         isTemporary,
@@ -265,7 +433,7 @@ export class StreamResolverService {
       };
     }
 
-    // 5. Necessidade de inspeção da página de origem (link expirado, inexistente ou inspeção forçada)
+    // 5. Necessidade de inspeção da página de origem (link expirado/inacessível, inexistente ou inspeção forçada)
     details.push(`Iniciando análise na página de origem: ${originUrl}`);
 
     // Validação estrita de protocolo da URL de origem
@@ -283,7 +451,7 @@ export class StreamResolverService {
           currentStreamUrl: streamUrl,
           originUrl,
           isTemporary,
-          isExpired,
+          isExpired: isExpiredByTimestamp,
           expirationTimestamp,
           formattedExpirationDate: formattedExpiration,
           signatureInfo: sigInfo
@@ -301,7 +469,7 @@ export class StreamResolverService {
         currentStreamUrl: streamUrl,
         originUrl,
         isTemporary,
-        isExpired,
+        isExpired: isExpiredByTimestamp,
         expirationTimestamp,
         formattedExpirationDate: formattedExpiration,
         signatureInfo: sigInfo
@@ -328,14 +496,14 @@ export class StreamResolverService {
         originTitle: input.originTitle,
         capturedAt: input.capturedAt,
         isTemporary,
-        isExpired,
+        isExpired: isExpiredByTimestamp,
         expirationTimestamp,
         formattedExpirationDate: formattedExpiration,
         signatureInfo: sigInfo
       };
     }
 
-    // 7. Tratamento de erros reportados pelo serviço de inspeção
+    // 7. Tratamento de erros reportados pelo serviço de inspeção da origem
     if (!inspectionResponse.success || !inspectionResponse.result) {
       const errCode = inspectionResponse.code || 'UNKNOWN_ERROR';
       const errMsg = inspectionResponse.error || 'Erro na inspeção da página remota.';
@@ -352,7 +520,7 @@ export class StreamResolverService {
           currentStreamUrl: streamUrl,
           originUrl,
           isTemporary,
-          isExpired,
+          isExpired: isExpiredByTimestamp,
           expirationTimestamp,
           formattedExpirationDate: formattedExpiration,
           signatureInfo: sigInfo,
@@ -378,7 +546,7 @@ export class StreamResolverService {
           currentStreamUrl: streamUrl,
           originUrl,
           isTemporary,
-          isExpired,
+          isExpired: isExpiredByTimestamp,
           expirationTimestamp,
           formattedExpirationDate: formattedExpiration,
           signatureInfo: sigInfo,
@@ -392,7 +560,6 @@ export class StreamResolverService {
         };
       }
 
-      // Outros erros (Timeout, resposta não-HTML, erro 404/500)
       return {
         strategy: errCode === 'TIMEOUT' ? 'inconclusive' : 'origin_unavailable',
         status: errCode === 'TIMEOUT' ? 'inconclusive' : 'unavailable',
@@ -404,7 +571,7 @@ export class StreamResolverService {
         currentStreamUrl: streamUrl,
         originUrl,
         isTemporary,
-        isExpired,
+        isExpired: isExpiredByTimestamp,
         expirationTimestamp,
         formattedExpirationDate: formattedExpiration,
         signatureInfo: sigInfo,
@@ -457,7 +624,7 @@ export class StreamResolverService {
         originTitle: res.pageTitle || input.originTitle,
         capturedAt: input.capturedAt,
         isTemporary,
-        isExpired,
+        isExpired: isExpiredByTimestamp,
         expirationTimestamp,
         formattedExpirationDate: formattedExpiration,
         signatureInfo: sigInfo,
@@ -484,7 +651,7 @@ export class StreamResolverService {
         originTitle: res.pageTitle || input.originTitle,
         capturedAt: input.capturedAt,
         isTemporary,
-        isExpired,
+        isExpired: isExpiredByTimestamp,
         expirationTimestamp,
         formattedExpirationDate: formattedExpiration,
         signatureInfo: sigInfo,
@@ -514,7 +681,7 @@ export class StreamResolverService {
         originTitle: res.pageTitle || input.originTitle,
         capturedAt: input.capturedAt,
         isTemporary,
-        isExpired,
+        isExpired: isExpiredByTimestamp,
         expirationTimestamp,
         formattedExpirationDate: formattedExpiration,
         signatureInfo: sigInfo,
@@ -541,7 +708,7 @@ export class StreamResolverService {
         originTitle: res.pageTitle || input.originTitle,
         capturedAt: input.capturedAt,
         isTemporary,
-        isExpired,
+        isExpired: isExpiredByTimestamp,
         expirationTimestamp,
         formattedExpirationDate: formattedExpiration,
         signatureInfo: sigInfo,
@@ -568,7 +735,7 @@ export class StreamResolverService {
         originTitle: res.pageTitle || input.originTitle,
         capturedAt: input.capturedAt,
         isTemporary,
-        isExpired,
+        isExpired: isExpiredByTimestamp,
         expirationTimestamp,
         formattedExpirationDate: formattedExpiration,
         signatureInfo: sigInfo,
@@ -595,7 +762,7 @@ export class StreamResolverService {
         originTitle: res.pageTitle || input.originTitle,
         capturedAt: input.capturedAt,
         isTemporary,
-        isExpired,
+        isExpired: isExpiredByTimestamp,
         expirationTimestamp,
         formattedExpirationDate: formattedExpiration,
         signatureInfo: sigInfo,
@@ -611,20 +778,24 @@ export class StreamResolverService {
       const candExpiration = candSig.expirationTimestamp;
       const candFormatted = this.formatExpirationDate(candExpiration);
 
+      const prefixMsg = streamProbeStatus && [401, 403, 404, 410].includes(streamProbeStatus)
+        ? `O link direto atual está inacessível ou possivelmente expirado (HTTP ${streamProbeStatus}). `
+        : '';
+
       return {
         strategy: 'auto_renewable',
         status: 'renewable',
-        canDirectPlay: false, // O novo link é candidato, cabe ao usuário ou camada superior adotá-lo
+        canDirectPlay: false, // O novo link é candidato, cabe ao usuário adotá-lo
         canAutoRenew: true,
         requiresSniffer: false,
-        summaryMessage: `Renovação automática viável: nova URL de mídia (${accessibleSource.format}) identificada e confirmada como acessível na página de origem.`,
+        summaryMessage: `${prefixMsg}Renovação automática viável: nova URL de mídia (${accessibleSource.format}) identificada e confirmada como acessível na página de origem.`,
         details: [
           ...details,
           `Fonte validada via probe: HTTP ${accessibleSource.statusCode || 200}${accessibleSource.supportsRange ? ' (Suporte a Range 206 ativo)' : ''}.`,
           accessibleSource.corsSupported ? 'CORS habilitado no servidor de origem.' : 'Sem cabeçalho CORS explícito.',
           candSig.isPotentiallyTemporary
             ? `A nova URL também possui assinatura temporária${candFormatted ? ` com validade estimada até ${candFormatted}` : ''}.`
-            : 'A nova URL não apresenta assinatura temporária aparente.'
+            : 'A nova URL não apresenta parâmetros de expiração declarados.'
         ],
         currentStreamUrl: streamUrl,
         candidateStreamUrl: accessibleSource.url,
@@ -656,14 +827,14 @@ export class StreamResolverService {
       summaryMessage: 'Fonte de mídia identificada no HTML da página de origem, porém sua acessibilidade direta não foi confirmada pelo servidor.',
       details: [
         ...details,
-        `Candidata não confirmada: ${unverifiedCandidate.url}`,
+        `Candidata não confirmada: ${sanitizeMediaUrlForDisplay(unverifiedCandidate.url)}`,
         unverifiedCandidate.notes ? `Nota da sondagem: ${unverifiedCandidate.notes}` : 'O servidor remoto pode exigir sessão ativa, cookies de navegador ou cabeçalhos de origem.',
         'Recomenda-se verificação assistida utilizando o NOVA Sniffer no navegador para capturar a sessão real.'
       ],
       currentStreamUrl: streamUrl,
       candidateStreamUrl: unverifiedCandidate.url,
       isTemporary,
-      isExpired,
+      isExpired: isExpiredByTimestamp,
       expirationTimestamp,
       formattedExpirationDate: formattedExpiration,
       originUrl,

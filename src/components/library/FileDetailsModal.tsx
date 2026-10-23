@@ -183,13 +183,14 @@ export const FileDetailsModal: React.FC<FileDetailsModalProps> = ({
     }
   };
 
-  // Executar resolução de link usando StreamResolverService
+  // Executar resolução de link usando StreamResolverService com verificação real da acessibilidade da streamUrl
   const handleResolveLink = async () => {
     setIsResolving(true);
     setResolutionError(null);
     try {
       const result = await StreamResolverService.resolveEpisode(currentEpisode, {
-        forceOriginInspection
+        forceOriginInspection,
+        probeCurrentStream: true
       });
       setResolutionResult(result);
     } catch (err: any) {
@@ -282,7 +283,7 @@ export const FileDetailsModal: React.FC<FileDetailsModalProps> = ({
         return (
           <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium bg-emerald-950/60 border border-emerald-500/50 text-emerald-300">
             <CheckCircle2 className="w-3.5 h-3.5" />
-            <span>Link Ativo e Utilizável</span>
+            <span>Link Acessível na Verificação Atual</span>
           </span>
         );
       case 'auto_renewable':
@@ -524,9 +525,13 @@ export const FileDetailsModal: React.FC<FileDetailsModalProps> = ({
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
                       <span className="text-[11px] font-medium text-neutral-400">URL Direta de Reprodução</span>
-                      {currentSig?.isPotentiallyTemporary && (
+                      {currentSig?.isPotentiallyTemporary ? (
                         <span className="px-1.5 py-0.5 text-[10px] rounded bg-amber-950/60 border border-amber-600/40 text-amber-300 font-mono">
-                          Assinatura Temporária
+                          Assinatura Temporária Declarada
+                        </span>
+                      ) : (
+                        <span className="px-1.5 py-0.5 text-[10px] rounded bg-neutral-900 border border-neutral-750 text-neutral-400 font-mono">
+                          Validade Não Declarada (Não Verificado)
                         </span>
                       )}
                     </div>

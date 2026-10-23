@@ -525,4 +525,255 @@ test('Etapa 3: Interface e Fluxo Seguro de Resolução e Renovação de Links', 
     assert.strictEqual(res.canAutoRenew, false);
     assert.strictEqual(res.requiresSniffer, true);
   });
+
+  // -------------------------------------------------------------------------
+  // 7. Validade Desconhecida: Sondagem HTTP 200/206 não infere link permanente
+  // -------------------------------------------------------------------------
+  await t.test('7. Validade desconhecida com HTTP 200: confirma acessibilidade atual sem inferir perenidade', async () => {
+    const rawR2Url = 'https://pub-r2.exemplo.com/hls/master.m3u8'; // Sem parâmetros de expiração
+    const mockProbe200 = async (url: string): Promise<InspectApiResponse> => {
+      return {
+        success: true,
+        result: {
+          pageUrl: url,
+          pageTitle: 'Fluxo Direto',
+          sourcesFound: [
+            {
+              url,
+              format: 'HLS',
+              discoveryMethod: 'direct_stream',
+              corsSupported: true,
+              accessible: true,
+              statusCode: 200,
+              supportsRange: true
+            }
+          ],
+          detectedIframes: [],
+          dynamicMediaIndicators: [],
+          diagnostics: {
+            fetchTimeMs: 40,
+            responseSizeBytes: 1024,
+            redirectCount: 0,
+            detectedDrm: false,
+            detectedProtectionOrCaptcha: false,
+            detectedIframesCount: 0,
+            detectedDynamicLoading: false,
+            status: 'direct_source_accessible',
+            summaryMessage: 'Fonte acessível'
+          }
+        }
+      };
+    };
+
+    const res = await StreamResolverService.resolveStream({
+      streamUrl: rawR2Url,
+      probeCurrentStream: true,
+      streamProbe: mockProbe200
+    });
+
+    assert.strictEqual(res.strategy, 'direct_usable');
+    assert.strictEqual(res.status, 'usable');
+    assert.strictEqual(res.canDirectPlay, true);
+    assert.strictEqual(res.isTemporary, false);
+    assert.strictEqual(res.isExpired, false);
+    assert.ok(!res.summaryMessage.includes('perene'), 'Não pode conter a palavra perene');
+    assert.ok(res.summaryMessage.includes('desconhecida') || res.summaryMessage.includes('não declara'));
+  });
+
+  // -------------------------------------------------------------------------
+  // 8. Validade Desconhecida: Sondagem HTTP 403 sem origem -> assistida sem expiração definitiva
+  // -------------------------------------------------------------------------
+  await t.test('8. Validade desconhecida com HTTP 403 sem origem: relata inacessível ou possivelmente expirado', async () => {
+    const expiredR2Url = 'https://pub-r2.exemplo.com/hls/video_1h_later.m3u8';
+    const mockProbe403 = async (url: string): Promise<InspectApiResponse> => {
+      return {
+        success: true,
+        result: {
+          pageUrl: url,
+          pageTitle: 'Acesso Recusado',
+          sourcesFound: [
+            {
+              url,
+              format: 'HLS',
+              discoveryMethod: 'direct_stream',
+              corsSupported: false,
+              accessible: false,
+              statusCode: 403,
+              notes: 'Recusado com HTTP 403 Forbidden'
+            }
+          ],
+          detectedIframes: [],
+          dynamicMediaIndicators: [],
+          diagnostics: {
+            fetchTimeMs: 45,
+            responseSizeBytes: 500,
+            redirectCount: 0,
+            detectedDrm: false,
+            detectedProtectionOrCaptcha: false,
+            detectedIframesCount: 0,
+            detectedDynamicLoading: false,
+            httpStatusCode: 403,
+            status: 'error',
+            summaryMessage: 'Recusado'
+          }
+        }
+      };
+    };
+
+    const res = await StreamResolverService.resolveStream({
+      streamUrl: expiredR2Url,
+      probeCurrentStream: true,
+      streamProbe: mockProbe403
+    });
+
+    assert.strictEqual(res.strategy, 'assisted_renewal_required');
+    assert.strictEqual(res.status, 'assisted');
+    assert.strictEqual(res.canDirectPlay, false);
+    assert.strictEqual(res.canAutoRenew, false);
+    assert.strictEqual(res.requiresSniffer, true);
+    // Não afirma expiração definitiva isoladamente pelo status
+    assert.ok(res.summaryMessage.includes('inacessível ou possivelmente expirado'));
+  });
+
+  // -------------------------------------------------------------------------
+  // 9. Validade Desconhecida: Sondagem HTTP 403 COM origem -> renova pela origem e preserva link atual
+  // -------------------------------------------------------------------------
+  await t.test('9. Validade desconhecida com HTTP 403 com origem: busca origem e obtém nova fonte mantendo URL atual', async () => {
+    storageMap.clear();
+
+    const originalUrl = 'https://cdn.r2.com/video_expirado.m3u8';
+    const newCandidate = 'https://cdn.r2.com/video_renovado.m3u8';
+
+    const ep = LocalCatalogService.addEpisode({
+      folderId: 'fld-test',
+      title: 'Episódio R2 Expirado',
+      originalFileName: 'r2_ep01.mp4',
+      seriesName: 'Série R2',
+      seasonNumber: 1,
+      episodeNumber: 1,
+      fileSizeBytes: 800000000,
+      durationSeconds: 1500,
+      resolution: '1080p',
+      dimensions: { width: 1920, height: 1080 },
+      frameRate: 23.976,
+      videoCodec: 'AVC / H.264',
+      bitrateKbps: 4500,
+      audioStreams: [],
+      subtitleStreams: [],
+      containerFormat: 'MP4',
+      checksumSha256: 'sha_r2_test',
+      streamUrl: originalUrl,
+      originUrl: 'https://site-origem.com/animes/ep-01'
+    });
+
+    const mockProbe403 = async (url: string): Promise<InspectApiResponse> => {
+      return {
+        success: true,
+        result: {
+          pageUrl: url,
+          pageTitle: 'Forbidden',
+          sourcesFound: [
+            {
+              url,
+              format: 'MP4',
+              discoveryMethod: 'direct_stream',
+              corsSupported: false,
+              accessible: false,
+              statusCode: 403
+            }
+          ],
+          detectedIframes: [],
+          dynamicMediaIndicators: [],
+          diagnostics: {
+            fetchTimeMs: 40,
+            responseSizeBytes: 100,
+            redirectCount: 0,
+            detectedDrm: false,
+            detectedProtectionOrCaptcha: false,
+            detectedIframesCount: 0,
+            detectedDynamicLoading: false,
+            httpStatusCode: 403,
+            status: 'error',
+            summaryMessage: 'HTTP 403'
+          }
+        }
+      };
+    };
+
+    const mockOriginInspector = async (url: string): Promise<InspectApiResponse> => {
+      return {
+        success: true,
+        result: {
+          pageUrl: url,
+          pageTitle: 'Episódio 01 Original',
+          sourcesFound: [
+            {
+              url: newCandidate,
+              format: 'HLS',
+              discoveryMethod: 'video_tag',
+              corsSupported: true,
+              accessible: true,
+              statusCode: 200,
+              supportsRange: true
+            }
+          ],
+          detectedIframes: [],
+          dynamicMediaIndicators: [],
+          diagnostics: {
+            fetchTimeMs: 100,
+            responseSizeBytes: 20000,
+            redirectCount: 0,
+            detectedDrm: false,
+            detectedProtectionOrCaptcha: false,
+            detectedIframesCount: 0,
+            detectedDynamicLoading: false,
+            status: 'direct_source_accessible',
+            summaryMessage: 'Fonte encontrada'
+          }
+        }
+      };
+    };
+
+    const res = await StreamResolverService.resolveEpisode(ep, {
+      probeCurrentStream: true,
+      streamProbe: mockProbe403,
+      pageInspector: mockOriginInspector
+    });
+
+    assert.strictEqual(res.strategy, 'auto_renewable');
+    assert.strictEqual(res.status, 'renewable');
+    assert.strictEqual(res.canAutoRenew, true);
+    assert.strictEqual(res.candidateStreamUrl, newCandidate);
+    assert.strictEqual(res.currentStreamUrl, originalUrl, 'Preserva a URL original no resultado');
+
+    // Verifica que o catálogo ainda mantém a URL original intacta
+    const inCatalog = LocalCatalogService.getEpisodes().find(e => e.id === ep.id);
+    assert.strictEqual(inCatalog?.streamUrl, originalUrl, 'URL original do catálogo não pode ser substituída automaticamente');
+  });
+
+  // -------------------------------------------------------------------------
+  // 10. Sondagem com Timeout: Resultado Inconclusivo sem declarar expiração
+  // -------------------------------------------------------------------------
+  await t.test('10. Sondagem com Timeout: resulta em inconclusive sem declarar expiração indevida', async () => {
+    const mockTimeout = async (_url: string): Promise<InspectApiResponse> => {
+      return {
+        success: false,
+        code: 'TIMEOUT',
+        error: 'Conexão excedeu o tempo limite de 4000ms'
+      };
+    };
+
+    const res = await StreamResolverService.resolveStream({
+      streamUrl: 'https://cdn.lento.com/video.mp4',
+      originUrl: 'https://site-origem.com/ep-01',
+      probeCurrentStream: true,
+      streamProbe: mockTimeout
+    });
+
+    assert.strictEqual(res.strategy, 'inconclusive');
+    assert.strictEqual(res.status, 'inconclusive');
+    assert.strictEqual(res.canDirectPlay, false);
+    assert.ok(res.summaryMessage.includes('tempo limite') || res.summaryMessage.includes('Falha de comunicação'));
+    assert.strictEqual(res.currentStreamUrl, 'https://cdn.lento.com/video.mp4');
+  });
 });

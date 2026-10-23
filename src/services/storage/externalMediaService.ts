@@ -109,10 +109,102 @@ export interface MediaSourceValidationEvaluation {
 }
 
 /**
- * Detecta se uma URL de mídia possui características de assinatura ou link temporário
- * com base em parâmetros comuns de expiração e autenticação por CDN
+ * Converte data em formato ISO 8601 básico (YYYYMMDDTHHMMSSZ) ou estendido em milissegundos UTC.
+ * Retorna null se a data for inválida ou fora dos limites reais do calendário.
  */
-export function detectTemporaryUrlSignature(url: string): TemporaryUrlSignatureInfo {
+export function parseIsoUtcDate(dateStr: string): number | null {
+  if (!dateStr || typeof dateStr !== 'string') return null;
+  const trimmed = dateStr.trim();
+
+  // 1. Formato básico AWS SigV4: YYYYMMDDTHHMMSSZ (case-insensitive para T e Z)
+  const basicMatch = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/i.exec(trimmed);
+  if (basicMatch) {
+    const year = parseInt(basicMatch[1], 10);
+    const month = parseInt(basicMatch[2], 10);
+    const day = parseInt(basicMatch[3], 10);
+    const hour = parseInt(basicMatch[4], 10);
+    const minute = parseInt(basicMatch[5], 10);
+    const second = parseInt(basicMatch[6], 10);
+
+    if (
+      month < 1 || month > 12 ||
+      day < 1 || day > 31 ||
+      hour > 23 ||
+      minute > 59 ||
+      second > 60
+    ) {
+      return null;
+    }
+
+    const utcMs = Date.UTC(year, month - 1, day, hour, minute, second);
+    const testDate = new Date(utcMs);
+    if (
+      testDate.getUTCFullYear() !== year ||
+      testDate.getUTCMonth() !== month - 1 ||
+      testDate.getUTCDate() !== day
+    ) {
+      return null;
+    }
+    return utcMs;
+  }
+
+  // 2. Formato estendido ISO 8601: YYYY-MM-DDTHH:MM:SSZ
+  const extendedMatch = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?Z$/i.exec(trimmed);
+  if (extendedMatch) {
+    const year = parseInt(extendedMatch[1], 10);
+    const month = parseInt(extendedMatch[2], 10);
+    const day = parseInt(extendedMatch[3], 10);
+    const hour = parseInt(extendedMatch[4], 10);
+    const minute = parseInt(extendedMatch[5], 10);
+    const second = parseInt(extendedMatch[6], 10);
+
+    if (
+      month < 1 || month > 12 ||
+      day < 1 || day > 31 ||
+      hour > 23 ||
+      minute > 59 ||
+      second > 60
+    ) {
+      return null;
+    }
+
+    const utcMs = Date.UTC(year, month - 1, day, hour, minute, second);
+    const testDate = new Date(utcMs);
+    if (
+      testDate.getUTCFullYear() !== year ||
+      testDate.getUTCMonth() !== month - 1 ||
+      testDate.getUTCDate() !== day
+    ) {
+      return null;
+    }
+    return utcMs;
+  }
+
+  return null;
+}
+
+/**
+ * Converte valor do parâmetro X-Amz-Expires em segundos numéricos válidos.
+ * Retorna null se não for um inteiro positivo finito.
+ */
+export function parseAmzExpires(expiresStr: string): number | null {
+  if (!expiresStr || typeof expiresStr !== 'string') return null;
+  const trimmed = expiresStr.trim();
+  if (!/^\d+$/.test(trimmed)) return null;
+  const val = parseInt(trimmed, 10);
+  if (isNaN(val) || val <= 0 || !Number.isFinite(val)) return null;
+  return val;
+}
+
+/**
+ * Detecta se uma URL de mídia possui características de assinatura ou link temporário
+ * com base em parâmetros comuns de expiração e autenticação por CDN, incluindo AWS SigV4
+ * (X-Amz-Date e X-Amz-Expires tratados de forma case-insensitive).
+ */
+export function detectTemporaryUrlSignature(
+  url: string,
+  now: number | Date = Date.now()
+): TemporaryUrlSignatureInfo {
   if (!url || typeof url !== 'string') {
     return { isPotentiallyTemporary: false, detectedParameters: [] };
   }
@@ -124,7 +216,44 @@ export function detectTemporaryUrlSignature(url: string): TemporaryUrlSignatureI
     let expirationTimestamp: number | undefined;
     let isProbablyExpired: boolean | undefined;
 
-    // Chaves comuns de expiração
+    const nowMs = typeof now === 'number'
+      ? now
+      : (now instanceof Date && !isNaN(now.getTime()) ? now.getTime() : Date.now());
+    const nowSec = Math.floor(nowMs / 1000);
+
+    // Mapeamento case-insensitive para busca de parâmetros sem diferenciar maiúsculas/minúsculas
+    // preservando a chave original para exibição precisa
+    const lowerKeyMap = new Map<string, { originalKey: string; value: string }>();
+    for (const [key, value] of params.entries()) {
+      lowerKeyMap.set(key.toLowerCase(), { originalKey: key, value });
+    }
+
+    // 1. Processamento de assinaturas AWS SigV4 (X-Amz-Date, X-Amz-Expires)
+    const amzDateEntry = lowerKeyMap.get('x-amz-date');
+    const amzExpiresEntry = lowerKeyMap.get('x-amz-expires');
+    let amzExpirationCalculated = false;
+
+    if (amzDateEntry || amzExpiresEntry) {
+      if (amzDateEntry) {
+        detected.push(amzDateEntry.originalKey);
+      }
+      if (amzExpiresEntry && amzExpiresEntry.originalKey !== amzDateEntry?.originalKey) {
+        detected.push(amzExpiresEntry.originalKey);
+      }
+
+      if (amzDateEntry && amzExpiresEntry) {
+        const amzDateUtcMs = parseIsoUtcDate(amzDateEntry.value);
+        const amzExpiresSec = parseAmzExpires(amzExpiresEntry.value);
+
+        if (amzDateUtcMs !== null && amzExpiresSec !== null) {
+          expirationTimestamp = Math.floor(amzDateUtcMs / 1000) + amzExpiresSec;
+          isProbablyExpired = expirationTimestamp <= nowSec;
+          amzExpirationCalculated = true;
+        }
+      }
+    }
+
+    // 2. Chaves de expiração padrão
     const expKeys = ['expires', 'expire', 'exp', 'e', 'wstime', 'validto', 'validity', 'deadline'];
     // Chaves comuns de assinatura e token de CDN
     const tokenKeys = [
@@ -147,21 +276,41 @@ export function detectTemporaryUrlSignature(url: string): TemporaryUrlSignatureI
 
     for (const [key, value] of params.entries()) {
       const lowerKey = key.toLowerCase();
+
+      // Pula chaves AWS já registradas acima
+      if (lowerKey === 'x-amz-date' || lowerKey === 'x-amz-expires') {
+        continue;
+      }
+
+      // Parâmetros adicionais AWS SigV4 (ex: X-Amz-Signature, X-Amz-Credential, X-Amz-Algorithm)
+      if (lowerKey.startsWith('x-amz-')) {
+        if (!detected.includes(key)) {
+          detected.push(key);
+        }
+        continue;
+      }
+
       if (expKeys.includes(lowerKey)) {
-        detected.push(key);
-        const numericVal = parseInt(value, 10);
-        if (!isNaN(numericVal) && numericVal > 0) {
-          expirationTimestamp = numericVal;
-          // Se for timestamp em segundos (ex: 1729000000)
-          if (numericVal > 1_000_000_000 && numericVal < 4_000_000_000) {
-            isProbablyExpired = numericVal < Math.floor(Date.now() / 1000);
-          } else if (numericVal >= 1_000_000_000_000) {
-            // Se for timestamp em milissegundos
-            isProbablyExpired = numericVal < Date.now();
+        if (!detected.includes(key)) {
+          detected.push(key);
+        }
+        if (!amzExpirationCalculated) {
+          const numericVal = parseInt(value, 10);
+          if (!isNaN(numericVal) && numericVal > 0) {
+            expirationTimestamp = numericVal;
+            // Se for timestamp em segundos (ex: 1729000000)
+            if (numericVal > 1_000_000_000 && numericVal < 4_000_000_000) {
+              isProbablyExpired = numericVal <= nowSec;
+            } else if (numericVal >= 1_000_000_000_000) {
+              // Se for timestamp em milissegundos
+              isProbablyExpired = numericVal <= nowMs;
+            }
           }
         }
       } else if (tokenKeys.includes(lowerKey)) {
-        detected.push(key);
+        if (!detected.includes(key)) {
+          detected.push(key);
+        }
       }
     }
 
@@ -169,10 +318,25 @@ export function detectTemporaryUrlSignature(url: string): TemporaryUrlSignatureI
     let reason: string | undefined;
 
     if (isPotentiallyTemporary) {
-      if (isProbablyExpired) {
+      if (amzExpirationCalculated && expirationTimestamp) {
+        const expIso = new Date(expirationTimestamp * 1000).toISOString();
+        if (isProbablyExpired) {
+          reason = `O parâmetro de validade AWS (${detected.join(', ')}) indica carimbo de expiração no passado (${expIso}). O link pode ter expirado.`;
+        } else {
+          reason = `Identificado parâmetro de expiração programada AWS (${detected.join(', ')}). Validade estimada até ${expIso} (o provedor pode aplicar restrições adicionais de acesso ou sessão).`;
+        }
+      } else if (isProbablyExpired) {
         reason = `O parâmetro de validade (${detected.join(', ')}) indica carimbo de data/hora no passado. O link pode ter expirado.`;
       } else if (expirationTimestamp) {
         reason = `Identificado parâmetro de expiração programada (${detected.join(', ')}).`;
+      } else if (amzDateEntry || amzExpiresEntry) {
+        if (amzDateEntry && !amzExpiresEntry) {
+          reason = `Identificado parâmetro de assinatura AWS (${detected.join(', ')}), porém o prazo de expiração (X-Amz-Expires) não foi fornecido.`;
+        } else if (!amzDateEntry && amzExpiresEntry) {
+          reason = `Identificado parâmetro de expiração AWS (${detected.join(', ')}), porém a data de início (X-Amz-Date) está ausente.`;
+        } else {
+          reason = `Identificados parâmetros de assinatura AWS (${detected.join(', ')}), porém os valores de data ou expiração são inválidos.`;
+        }
       } else {
         reason = `Identificado(s) parâmetro(s) de assinatura de CDN (${detected.join(', ')}).`;
       }
@@ -219,14 +383,17 @@ export function sanitizeMediaUrlForDisplay(url: string): string {
       'mac',
       'hmac',
       'wssecret',
-      'policy'
+      'policy',
+      'x-amz-signature',
+      'x-amz-security-token',
+      'x-amz-credential'
     ];
 
     const newParams = new URLSearchParams();
     for (const [key, value] of parsed.searchParams.entries()) {
       const lowerKey = key.toLowerCase();
       const isSensitive = sensitiveKeys.some(k => lowerKey === k || lowerKey.includes(k));
-      if (isSensitive && value && value.length > 4) {
+      if (isSensitive && value && value.length > 0) {
         newParams.set(key, '[token_protegido]');
       } else {
         newParams.set(key, value);
