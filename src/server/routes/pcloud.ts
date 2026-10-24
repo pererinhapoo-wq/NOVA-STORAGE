@@ -310,8 +310,25 @@ pcloudRouter.get('/pcloud/auth-url', async (req: Request, res: Response) => {
 pcloudRouter.get(['/pcloud/callback', '/pcloud/callback/', '/callback', '/callback/'], async (req: Request, res: Response) => {
   const code = typeof req.query.code === 'string' ? req.query.code.trim() : undefined;
   const state = typeof req.query.state === 'string' ? req.query.state.trim() : undefined;
-  const oauthError = req.query.error as string | undefined;
+  const oauthError = (req.query.error || req.query.error_description) as string | undefined;
   const trustedOrigin = PCloudService.getTrustedOrigin();
+
+  // Diagnóstico seguro: captura presença booleana e chaves dos parâmetros (NUNCA valores de segredos)
+  const rawQueryKeys = Object.keys(req.query || {});
+  const sanitizedParamKeys = rawQueryKeys.map(k => String(k).replace(/[^\w-]/g, '')).filter(Boolean);
+  const signedCookiePresent = Boolean(req.signedCookies?.[DriveAuthService.COOKIE_NAME]);
+  const hasCode = Boolean(code);
+  const hasState = Boolean(state);
+  const hasError = Boolean(oauthError);
+
+  console.info('[NOVA STORAGE pCloud OAuth Callback] Diagnóstico Seguro de Parâmetros:', {
+    hasCode,
+    hasState,
+    hasError,
+    signedCookiePresent,
+    receivedParamNames: sanitizedParamKeys,
+    timestamp: new Date().toISOString()
+  });
 
   // 1. Trata erro de autorização retornado diretamente pelo pCloud (ex: usuário recusou)
   if (oauthError) {
@@ -324,7 +341,7 @@ pcloudRouter.get(['/pcloud/callback', '/pcloud/callback/', '/callback', '/callba
           <title>NOVA STORAGE - Erro OAuth pCloud</title>
           <style>
             body { background: #090a0d; color: #f87171; font-family: sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; text-align: center; }
-            .box { padding: 2rem; border: 1px solid #374151; border-radius: 0.75rem; background: #111827; max-width: 400px; }
+            .box { padding: 2rem; border: 1px solid #374151; border-radius: 0.75rem; background: #111827; max-width: 440px; }
           </style>
         </head>
         <body>
@@ -344,18 +361,103 @@ pcloudRouter.get(['/pcloud/callback', '/pcloud/callback/', '/callback', '/callba
     return;
   }
 
-  // 2. Validação dos parâmetros obrigatórios
+  // 2. Validação estrita e diagnóstico seguro dos parâmetros obrigatórios (code e state)
   if (!code || !state) {
+    let missingDetail = '';
+    let summaryForOpener = '';
+    if (!hasCode && !hasState) {
+      missingDetail = "Código de autorização ('code') e proteção anti-CSRF ('state') ausentes.";
+      summaryForOpener = 'Parâmetros code e state ausentes no callback pCloud.';
+    } else if (!hasCode) {
+      missingDetail = "Código de autorização ('code') ausente na resposta do provedor.";
+      summaryForOpener = 'Código de autorização code ausente no callback pCloud.';
+    } else {
+      missingDetail = "Parâmetro de proteção anti-CSRF ('state') ausente na resposta do provedor.";
+      summaryForOpener = 'Parâmetro state anti-CSRF ausente no callback pCloud.';
+    }
+
+    const receivedKeysFormatted = sanitizedParamKeys.length > 0 ? sanitizedParamKeys.join(', ') : 'Nenhum';
+
     res.status(400).send(`
       <!DOCTYPE html>
       <html lang="pt-BR">
         <head>
           <meta charset="UTF-8">
-          <title>NOVA STORAGE - Parâmetros Inválidos</title>
-          <style>body { background: #090a0d; color: #f87171; font-family: sans-serif; text-align: center; padding-top: 5rem; }</style>
+          <title>NOVA STORAGE - Diagnóstico OAuth pCloud</title>
+          <style>
+            body { background: #090a0d; color: #f1f5f9; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 1rem; }
+            .box { padding: 1.75rem; border: 1px solid #374151; border-radius: 0.75rem; background: #111827; max-width: 480px; width: 100%; box-shadow: 0 10px 25px -5px rgba(0,0,0,0.5); text-align: left; }
+            h3 { color: #f87171; margin-top: 0; margin-bottom: 0.75rem; font-size: 1.125rem; }
+            .desc { color: #cbd5e1; font-size: 0.875rem; margin-bottom: 1rem; line-height: 1.4; }
+            .diag-list { background: #090a0d; border: 1px solid #1f2937; border-radius: 0.5rem; padding: 0.75rem; font-size: 0.8125rem; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; margin-bottom: 0.75rem; }
+            .diag-item { display: flex; justify-content: space-between; padding: 0.25rem 0; border-bottom: 1px solid #1e293b; }
+            .diag-item:last-child { border-bottom: none; }
+            .tag-present { color: #34d399; font-weight: 600; }
+            .tag-missing { color: #f87171; font-weight: 600; }
+            .tag-neutral { color: #38bdf8; }
+            .fragment-box { background: #090a0d; border: 1px solid #334155; border-radius: 0.5rem; padding: 0.625rem; font-size: 0.75rem; font-family: monospace; color: #94a3b8; word-break: break-all; margin-top: 0.5rem; }
+            .actions { margin-top: 1.25rem; text-align: center; }
+            button { background: #1e293b; color: #e2e8f0; border: 1px solid #475569; padding: 0.5rem 1.25rem; border-radius: 0.5rem; font-size: 0.8125rem; font-weight: 500; cursor: pointer; transition: all 0.2s; }
+            button:hover { background: #334155; color: #fff; }
+          </style>
         </head>
         <body>
-          <h3>Parâmetros ausentes no retorno OAuth do pCloud (code ou state ausentes).</h3>
+          <div class="box">
+            <h3>Parâmetros ausentes no retorno OAuth do pCloud</h3>
+            <p class="desc">${missingDetail}</p>
+            
+            <div class="diag-list">
+              <div class="diag-item">
+                <span>Código OAuth (code):</span>
+                <span class="${hasCode ? 'tag-present' : 'tag-missing'}">${hasCode ? '✓ Presente' : '✗ Ausente'}</span>
+              </div>
+              <div class="diag-item">
+                <span>Proteção CSRF (state):</span>
+                <span class="${hasState ? 'tag-present' : 'tag-missing'}">${hasState ? '✓ Presente' : '✗ Ausente'}</span>
+              </div>
+              <div class="diag-item">
+                <span>Cookie de Sessão Assinado:</span>
+                <span class="${signedCookiePresent ? 'tag-present' : 'tag-missing'}">${signedCookiePresent ? '✓ Detectado' : '✗ Não detectado'}</span>
+              </div>
+              <div class="diag-item">
+                <span>Chaves na Query HTTP:</span>
+                <span class="tag-neutral">${receivedKeysFormatted}</span>
+              </div>
+            </div>
+
+            <div id="client-fragment-diag" class="fragment-box">
+              Inspecionando fragmento (#) na URL do navegador...
+            </div>
+
+            <div class="actions">
+              <button type="button" onclick="window.close()">Fechar Janela</button>
+            </div>
+
+            <script>
+              try {
+                var hash = window.location.hash ? window.location.hash.substring(1) : '';
+                var diagEl = document.getElementById('client-fragment-diag');
+                if (diagEl) {
+                  if (hash) {
+                    var hashParams = new URLSearchParams(hash);
+                    var hashKeys = [];
+                    hashParams.forEach(function(_, k) {
+                      if (hashKeys.indexOf(k) === -1) hashKeys.push(k.replace(/[^\\w-]/g, ''));
+                    });
+                    diagEl.innerHTML = '<span style="color: #fbbf24;">Fragmento detectado (#):</span> chaves [' + hashKeys.join(', ') + ']';
+                  } else {
+                    diagEl.textContent = 'Nenhum fragmento (#) detectado na URL do navegador.';
+                  }
+                }
+                if (window.opener) {
+                  window.opener.postMessage({
+                    type: 'PCLOUD_OAUTH_ERROR',
+                    error: ${JSON.stringify(summaryForOpener)}
+                  }, ${JSON.stringify(trustedOrigin)});
+                }
+              } catch (e) {}
+            </script>
+          </div>
         </body>
       </html>
     `);
