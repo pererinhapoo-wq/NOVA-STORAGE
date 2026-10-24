@@ -307,24 +307,13 @@ pcloudRouter.get('/pcloud/auth-url', async (req: Request, res: Response) => {
  * - NUNCA expõe o access_token, client_secret ou PCLOUD_ADMIN_TOKEN no HTML, URL ou logs.
  * - Emite postMessage restrito à origem confiável do aplicativo e fecha a janela popup.
  */
-/**
- * Mascara com segurança parâmetros sensíveis na URL para fins de diagnóstico
- * Substitui os valores de code, state, token, secret por [MASKED] sem expor segredos.
- */
-function maskSensitiveUrl(rawUrl?: string): string {
-  if (!rawUrl || typeof rawUrl !== 'string') return '';
-  return rawUrl.replace(/([?&])(code|state|token|access_token|refresh_token|secret|client_secret|auth)=([^&]*)/gi, '$1$2=[MASKED]');
-}
-
 pcloudRouter.get(['/pcloud/callback', '/pcloud/callback/', '/callback', '/callback/'], async (req: Request, res: Response) => {
   const code = typeof req.query.code === 'string' ? req.query.code.trim() : undefined;
   const state = typeof req.query.state === 'string' ? req.query.state.trim() : undefined;
   const oauthError = (req.query.error || req.query.error_description) as string | undefined;
   const trustedOrigin = PCloudService.getTrustedOrigin();
 
-  // Diagnóstico seguro de URL e parâmetros de entrada (NUNCA valores de segredos)
-  const incomingOriginalUrl = maskSensitiveUrl(req.originalUrl);
-  const incomingReqUrl = maskSensitiveUrl(req.url);
+  // Diagnóstico seguro de URL e parâmetros de entrada (NUNCA valores de segredos nem URLs completas)
   const requestPath = (req.originalUrl || req.url || '').split('?')[0];
   const hasQueryString = Boolean((req.originalUrl || req.url || '').includes('?'));
   const queryStringLength = (req.originalUrl || req.url || '').split('?')[1]?.length || 0;
@@ -349,14 +338,12 @@ pcloudRouter.get(['/pcloud/callback', '/pcloud/callback/', '/callback', '/callba
     requestPath,
     hasQueryString,
     queryStringLength,
-    incomingReqUrl,
-    incomingOriginalUrl,
-    refererDomain,
+    receivedParamNames: sanitizedParamKeys,
     hasCode,
     hasState,
     hasError,
     signedCookiePresent,
-    receivedParamNames: sanitizedParamKeys,
+    refererDomain,
     timestamp: new Date().toISOString()
   });
 
@@ -438,10 +425,6 @@ pcloudRouter.get(['/pcloud/callback', '/pcloud/callback/', '/callback', '/callba
             
             <div class="diag-list">
               <div class="diag-item">
-                <span>Caminho da Requisição:</span>
-                <span class="tag-neutral">${String(requestPath).replace(/[<>&"']/g, '')}</span>
-              </div>
-              <div class="diag-item">
                 <span>Query String no Servidor:</span>
                 <span class="${hasQueryString ? 'tag-present' : 'tag-missing'}">${hasQueryString ? `Sim (${queryStringLength} chars)` : 'Não (0 chars)'}</span>
               </div>
@@ -460,10 +443,6 @@ pcloudRouter.get(['/pcloud/callback', '/pcloud/callback/', '/callback', '/callba
               <div class="diag-item">
                 <span>Chaves na Query HTTP:</span>
                 <span class="tag-neutral">${receivedKeysFormatted}</span>
-              </div>
-              <div class="diag-item">
-                <span>Domínio Referer:</span>
-                <span class="tag-neutral">${refererDomain ? String(refererDomain).replace(/[<>&"']/g, '') : 'Nenhum'}</span>
               </div>
             </div>
 
