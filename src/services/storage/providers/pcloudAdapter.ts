@@ -268,9 +268,130 @@ export class PCloudStorageAdapter implements StorageProviderAdapter {
   }
 
   /**
-   * Listagem de pasta remota: mantida vazia
+   * Listagem de pasta remota com formato padrão RemoteFileMetadata
    */
-  async listFolderContents(_folderRemoteId?: string): Promise<RemoteFileMetadata[]> {
-    return [];
+  async listFolderContents(folderRemoteId?: string): Promise<RemoteFileMetadata[]> {
+    const folderId = folderRemoteId && /^\d+$/.test(folderRemoteId.trim()) ? folderRemoteId.trim() : '0';
+    try {
+      const res = await fetch(`/api/storage/pcloud/files?folderId=${encodeURIComponent(folderId)}&videosOnly=true`, {
+        headers: this.getRequestHeaders(),
+        credentials: 'include'
+      });
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        throw new Error(data.message || data.error || `HTTP ${res.status}: Erro ao listar arquivos do pCloud.`);
+      }
+
+      return (data.files || []).map((f: any) => ({
+        remoteId: String(f.fileId || f.id),
+        name: f.name,
+        sizeBytes: f.sizeBytes,
+        mimeType: f.mimeType,
+        createdTime: f.createdTime,
+        modifiedTime: f.modifiedTime
+      }));
+    } catch (err: any) {
+      console.error('[PCloudStorageAdapter] Erro ao listar pasta:', err);
+      return [];
+    }
+  }
+
+  /**
+   * Consulta o conteúdo completo da pasta (subpastas e arquivos) para o explorador interativo
+   */
+  async listFolderWithMetadata(folderRemoteId?: string, videosOnly: boolean = false): Promise<{
+    success: boolean;
+    folderId: number;
+    folderName: string;
+    parentFolderId?: number | null;
+    path?: string;
+    folders: Array<{
+      id: string;
+      folderId: number;
+      name: string;
+      parentFolderId?: number;
+      modifiedTime?: string;
+    }>;
+    files: Array<{
+      id: string;
+      fileId: number;
+      name: string;
+      sizeBytes: number;
+      mimeType: string;
+      isVideo: boolean;
+      format: string;
+      category?: number;
+      modifiedTime?: string;
+      createdTime?: string;
+    }>;
+    error?: string;
+  }> {
+    const folderId = folderRemoteId && /^\d+$/.test(folderRemoteId.trim()) ? folderRemoteId.trim() : '0';
+    const res = await fetch(`/api/storage/pcloud/files?folderId=${encodeURIComponent(folderId)}&videosOnly=${videosOnly}`, {
+      headers: this.getRequestHeaders(),
+      credentials: 'include'
+    });
+
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.success) {
+      throw new Error(data.message || data.error || `HTTP ${res.status}: Erro ao listar conteúdo no pCloud.`);
+    }
+
+    return data;
+  }
+
+  /**
+   * Utilitários estáticos para formatação e classificação no frontend
+   */
+  public static inferFormat(fileName: string, mimeType?: string): string {
+    const lower = fileName.toLowerCase();
+    if (lower.endsWith('.mkv')) return 'MKV';
+    if (lower.endsWith('.mp4') || lower.endsWith('.m4v')) return 'MP4';
+    if (lower.endsWith('.webm')) return 'WEBM';
+    if (lower.endsWith('.avi')) return 'AVI';
+    if (lower.endsWith('.ts')) return 'TS';
+    if (lower.endsWith('.mov')) return 'MOV';
+    if (mimeType?.includes('matroska')) return 'MKV';
+    if (mimeType?.includes('mp4')) return 'MP4';
+    if (mimeType?.includes('webm')) return 'WEBM';
+    return 'MP4';
+  }
+
+  public static isVideoFile(fileName: string, mimeType?: string): boolean {
+    const lower = fileName.toLowerCase();
+    const videoExts = ['.mp4', '.mkv', '.webm', '.avi', '.mov', '.m4v', '.wmv', '.flv', '.ts', '.3gp'];
+    if (videoExts.some(ext => lower.endsWith(ext))) return true;
+    if (mimeType && mimeType.toLowerCase().startsWith('video/')) return true;
+    return false;
+  }
+
+  public static isNativePlayable(format: string): boolean {
+    const upper = format.toUpperCase();
+    return upper === 'MP4' || upper === 'WEBM';
+  }
+
+  public static formatBytes(bytes: number): string {
+    if (!bytes || isNaN(bytes) || bytes <= 0) return '0.00 B';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(1024));
+    const val = bytes / Math.pow(1024, i);
+    return `${val.toFixed(2)} ${units[i]}`;
+  }
+
+  public static formatDate(dateStr?: string): string {
+    if (!dateStr) return '—';
+    try {
+      const d = new Date(dateStr);
+      if (isNaN(d.getTime())) return dateStr;
+      return d.toLocaleDateString('pt-BR', {
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric'
+      });
+    } catch {
+      return dateStr;
+    }
   }
 }
+

@@ -696,6 +696,100 @@ pcloudRouter.post('/pcloud/test-connection', async (req: Request, res: Response)
 });
 
 /**
+ * GET /api/storage/pcloud/files
+ * Lista pastas e arquivos do pCloud utilizando a API oficial 'listfolder'.
+ * Suporta navegação entre pastas por seu folderId remoto e filtro de vídeos.
+ * 
+ * Regras de Autorização e Segurança:
+ * - Exige autenticação (sessão de admin ou token de admin).
+ * - Valida e normaliza parâmetro folderId.
+ * - Utiliza token exclusivo do servidor (nunca enviado ao cliente).
+ */
+pcloudRouter.get(['/pcloud/files', '/pcloud/files/', '/files', '/files/'], async (req: Request, res: Response) => {
+  const auth = await authenticatePCloudRequest(req);
+
+  if (!auth.authenticated) {
+    return res.status(401).json({
+      success: false,
+      code: 'AUTH_REQUIRED',
+      message: 'Autenticação obrigatória para consultar arquivos no pCloud.',
+      folderId: 0,
+      folderName: '/',
+      folders: [],
+      files: [],
+      totalFolders: 0,
+      totalFiles: 0
+    });
+  }
+
+  // Defesa Anti-CSRF para requisições autenticadas por cookie de sessão
+  if (auth.authMethod === 'session') {
+    const csrfCheck = verifyCsrfForSession(req);
+    if (!csrfCheck.valid) {
+      return res.status(403).json({
+        success: false,
+        code: csrfCheck.code,
+        message: csrfCheck.message,
+        folderId: 0,
+        folderName: '/',
+        folders: [],
+        files: [],
+        totalFolders: 0,
+        totalFiles: 0
+      });
+    }
+  }
+
+  const rawFolderId = req.query.folderId || req.query.folderid;
+  let folderId = 0;
+  if (typeof rawFolderId === 'string' && /^\d+$/.test(rawFolderId.trim())) {
+    folderId = parseInt(rawFolderId.trim(), 10);
+  }
+
+  const videosOnly = req.query.videosOnly !== 'false';
+
+  try {
+    const result = await PCloudService.listFolder(folderId, auth.session, { videosOnly });
+
+    if (result.success) {
+      return res.status(200).json({
+        ...result,
+        status: 'connected',
+        timestamp: new Date().toISOString()
+      });
+    }
+
+    const statusCode = result.code === 'AUTH_FAILED'
+      ? 401
+      : result.code === 'FOLDER_NOT_FOUND'
+      ? 404
+      : result.code === 'NOT_CONFIGURED'
+      ? 503
+      : 400;
+
+    return res.status(statusCode).json({
+      ...result,
+      status: 'error',
+      message: result.error,
+      timestamp: new Date().toISOString()
+    });
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      code: 'INTERNAL_ERROR',
+      message: err.message || 'Erro interno ao consultar arquivos no pCloud.',
+      folderId,
+      folderName: '/',
+      folders: [],
+      files: [],
+      totalFolders: 0,
+      totalFiles: 0,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+/**
  * POST /api/storage/pcloud/file-link
  * Gera um link de streaming / acesso direto a partir do identificador permanente (fileId) no pCloud
  * 

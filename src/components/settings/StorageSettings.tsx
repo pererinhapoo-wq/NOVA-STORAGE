@@ -24,13 +24,21 @@ import {
   Square,
   ArrowUpDown,
   FileText,
-  Filter
+  Filter,
+  Folder,
+  ArrowLeft,
+  ChevronRight,
+  FolderPlus,
+  UploadCloud,
+  Check
 } from 'lucide-react';
 import { StorageProviderConfig } from '../../types/storage';
 import { GoogleDriveStorageAdapter, DriveVideoItem } from '../../services/storage/providers/googleDriveAdapter';
 import { MegaStorageAdapter } from '../../services/storage/providers/megaAdapter';
 import { PCloudStorageAdapter } from '../../services/storage/providers/pcloudAdapter';
 import { DriveVideoPlayerModal } from './DriveVideoPlayerModal';
+import { PCloudVideoPlayerModal, PCloudVideoModalItem } from './PCloudVideoPlayerModal';
+import { LocalCatalogService } from '../../services/storage/localCatalogService';
 import { MuxVideoTester } from './MuxVideoTester';
 import { ExternalMediaTester } from './ExternalMediaTester';
 
@@ -101,6 +109,34 @@ export const StorageSettings: React.FC<StorageSettingsProps> = ({
   const [formatFilter, setFormatFilter] = useState<string>('ALL');
   const [sortBy, setSortBy] = useState<'name-asc' | 'name-desc' | 'date-desc' | 'size-desc'>('name-asc');
   const [selectedVideoIds, setSelectedVideoIds] = useState<Set<string>>(new Set());
+
+  // pCloud Video & Folder Explorer States
+  const [isExploringPCloud, setIsExploringPCloud] = useState(false);
+  const [pcloudCurrentFolderId, setPcloudCurrentFolderId] = useState<string>('0');
+  const [pcloudCurrentFolderName, setPcloudCurrentFolderName] = useState<string>('Raiz');
+  const [pcloudFolderBreadcrumbs, setPcloudFolderBreadcrumbs] = useState<Array<{ id: string; name: string }>>([
+    { id: '0', name: 'Raiz (/)' }
+  ]);
+  const [pcloudSubfolders, setPcloudSubfolders] = useState<Array<{ id: string; folderId: number; name: string; modifiedTime?: string }>>([]);
+  const [pcloudFiles, setPcloudFiles] = useState<Array<{
+    id: string;
+    fileId: number;
+    name: string;
+    sizeBytes: number;
+    mimeType: string;
+    isVideo: boolean;
+    format: string;
+    modifiedTime?: string;
+  }>>([]);
+  const [isLoadingPCloudFiles, setIsLoadingPCloudFiles] = useState(false);
+  const [pcloudFilesError, setPcloudFilesError] = useState<string | null>(null);
+  const [selectedPCloudFileIds, setSelectedPCloudFileIds] = useState<Set<string>>(new Set());
+  const [pcloudSearchQuery, setPcloudSearchQuery] = useState('');
+  const [pcloudFormatFilter, setPcloudFormatFilter] = useState<string>('ALL');
+  const [pcloudSortBy, setPcloudSortBy] = useState<'name-asc' | 'name-desc' | 'date-desc' | 'size-desc'>('name-asc');
+  const [selectedPCloudVideo, setSelectedPCloudVideo] = useState<PCloudVideoModalItem | null>(null);
+  const [pcloudTargetFolderId, setPcloudTargetFolderId] = useState<string>('');
+  const [isImportingPCloud, setIsImportingPCloud] = useState(false);
 
   const fetchDriveStatus = React.useCallback(async () => {
     try {
@@ -531,6 +567,161 @@ export const StorageSettings: React.FC<StorageSettingsProps> = ({
 
   const handleClearSelection = () => {
     setSelectedVideoIds(new Set());
+  };
+
+  // ==========================================
+  // pCloud Explorer: Manipuladores & Filtros
+  // ==========================================
+
+  const handleLoadPCloudFolder = React.useCallback(async (folderId: string = '0', folderName: string = 'Raiz') => {
+    setIsLoadingPCloudFiles(true);
+    setPcloudFilesError(null);
+    setSelectedPCloudFileIds(new Set());
+    try {
+      const adapter = new PCloudStorageAdapter();
+      const result = await adapter.listFolderWithMetadata(folderId, false);
+      setPcloudCurrentFolderId(String(result.folderId));
+      setPcloudCurrentFolderName(result.folderName || folderName);
+      setPcloudSubfolders(result.folders || []);
+      setPcloudFiles(result.files || []);
+    } catch (err: any) {
+      setPcloudFilesError(err?.message || 'Falha ao consultar arquivos e pastas no pCloud.');
+      setPcloudSubfolders([]);
+      setPcloudFiles([]);
+    } finally {
+      setIsLoadingPCloudFiles(false);
+    }
+  }, []);
+
+  const handleOpenPCloudSubfolder = (folderId: string, folderName: string) => {
+    setPcloudFolderBreadcrumbs(prev => [...prev, { id: folderId, name: folderName }]);
+    handleLoadPCloudFolder(folderId, folderName);
+  };
+
+  const handleNavigatePCloudBreadcrumb = (index: number) => {
+    const target = pcloudFolderBreadcrumbs[index];
+    if (!target) return;
+    setPcloudFolderBreadcrumbs(prev => prev.slice(0, index + 1));
+    handleLoadPCloudFolder(target.id, target.name);
+  };
+
+  const handleGoBackPCloudFolder = () => {
+    if (pcloudFolderBreadcrumbs.length <= 1) return;
+    const nextBreadcrumbs = pcloudFolderBreadcrumbs.slice(0, -1);
+    const parentTarget = nextBreadcrumbs[nextBreadcrumbs.length - 1];
+    setPcloudFolderBreadcrumbs(nextBreadcrumbs);
+    handleLoadPCloudFolder(parentTarget.id, parentTarget.name);
+  };
+
+  const handleToggleSelectPCloudFile = (fileId: string) => {
+    setSelectedPCloudFileIds(prev => {
+      const next = new Set(prev);
+      if (next.has(fileId)) {
+        next.delete(fileId);
+      } else {
+        next.add(fileId);
+      }
+      return next;
+    });
+  };
+
+  const filteredPCloudFiles = useMemo(() => {
+    let result = [...pcloudFiles];
+
+    if (pcloudSearchQuery.trim()) {
+      const q = pcloudSearchQuery.toLowerCase().trim();
+      result = result.filter(f => f.name.toLowerCase().includes(q));
+    }
+
+    if (pcloudFormatFilter !== 'ALL') {
+      result = result.filter(f => f.format.toUpperCase() === pcloudFormatFilter);
+    }
+
+    result.sort((a, b) => {
+      if (pcloudSortBy === 'name-asc') return a.name.localeCompare(b.name, 'pt-BR', { numeric: true });
+      if (pcloudSortBy === 'name-desc') return b.name.localeCompare(a.name, 'pt-BR', { numeric: true });
+      if (pcloudSortBy === 'size-desc') return b.sizeBytes - a.sizeBytes;
+      if (pcloudSortBy === 'date-desc') {
+        const da = a.modifiedTime ? new Date(a.modifiedTime).getTime() : 0;
+        const db = b.modifiedTime ? new Date(b.modifiedTime).getTime() : 0;
+        return db - da;
+      }
+      return 0;
+    });
+
+    return result;
+  }, [pcloudFiles, pcloudSearchQuery, pcloudFormatFilter, pcloudSortBy]);
+
+  const isAllVisiblePCloudSelected = useMemo(() => {
+    if (filteredPCloudFiles.length === 0) return false;
+    return filteredPCloudFiles.every(f => selectedPCloudFileIds.has(f.id));
+  }, [filteredPCloudFiles, selectedPCloudFileIds]);
+
+  const handleToggleSelectAllVisiblePCloudFiles = () => {
+    if (isAllVisiblePCloudSelected) {
+      setSelectedPCloudFileIds(new Set());
+    } else {
+      const allIds = new Set(filteredPCloudFiles.map(f => f.id));
+      setSelectedPCloudFileIds(allIds);
+    }
+  };
+
+  const handleImportSelectedPCloudVideos = async () => {
+    if (selectedPCloudFileIds.size === 0) return;
+    setIsImportingPCloud(true);
+    try {
+      const catalogFolders = LocalCatalogService.getFolders();
+      const targetFolder = catalogFolders.find(f => f.id === pcloudTargetFolderId) || catalogFolders[0];
+      const folderId = targetFolder?.id || 'fld-avulso';
+      const seriesName = targetFolder?.name || 'Série Avulsa';
+
+      const selectedFiles = pcloudFiles.filter(f => selectedPCloudFileIds.has(f.id));
+      let importedCount = 0;
+
+      for (const file of selectedFiles) {
+        const cleanTitle = file.name.replace(/\.[^/.]+$/, '').replace(/[._-]/g, ' ').trim();
+        const ep = LocalCatalogService.addEpisode({
+          title: cleanTitle || file.name,
+          originalFileName: file.name,
+          seriesName,
+          folderId,
+          seasonNumber: 1,
+          episodeNumber: importedCount + 1,
+          fileSizeBytes: file.sizeBytes,
+          durationSeconds: 1440,
+          resolution: '1080p',
+          dimensions: { width: 1920, height: 1080 },
+          frameRate: 23.976,
+          videoCodec: 'HEVC / H.265',
+          bitrateKbps: 7500,
+          containerFormat: (file.format as any) || 'MP4',
+          checksumSha256: `pcloud-${file.id}`,
+          audioStreams: [{ id: 'a1', language: 'Original', codec: 'AAC', channels: '2.0', isDefault: true }],
+          subtitleStreams: [],
+          notes: `Importado diretamente do pCloud (ID permanente: ${file.id}).`
+        });
+
+        // Vincula o remoteFileId e remoteProvider
+        LocalCatalogService.updateEpisode(ep.id, {
+          remoteFileId: file.id,
+          remoteProvider: 'pcloud',
+          storageProviderStatus: 'synced'
+        });
+
+        importedCount++;
+      }
+
+      setSelectedPCloudFileIds(new Set());
+      onNotify(
+        'Vídeos Importados com Sucesso!',
+        `${importedCount} ${importedCount === 1 ? 'vídeo foi adicionado' : 'vídeos foram adicionados'} à pasta "${seriesName}" na biblioteca da NOVA STORAGE.`,
+        'success'
+      );
+    } catch (err: any) {
+      onNotify('Erro na Importação', err?.message || 'Falha ao importar vídeos do pCloud.', 'error');
+    } finally {
+      setIsImportingPCloud(false);
+    }
   };
 
   const activeFolderId = providers.find(p => p.id === 'google_drive')?.settings.targetFolderId?.trim();
@@ -1478,13 +1669,30 @@ export const StorageSettings: React.FC<StorageSettingsProps> = ({
 
             <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto">
               {pcloudStatus?.connected ? (
-                <button
-                  type="button"
-                  onClick={handleDisconnectPCloud}
-                  className="px-3 py-1.5 text-xs font-medium text-rose-400 hover:text-rose-300 hover:bg-rose-950/40 border border-rose-900/50 rounded-lg transition-colors whitespace-nowrap"
-                >
-                  Desconectar pCloud
-                </button>
+                <>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (!isExploringPCloud) {
+                        setIsExploringPCloud(true);
+                        handleLoadPCloudFolder(pcloudCurrentFolderId || '0', pcloudCurrentFolderName || 'Raiz');
+                      } else {
+                        setIsExploringPCloud(false);
+                      }
+                    }}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-neutral-950 bg-cyan-400 hover:bg-cyan-300 rounded-lg transition-colors whitespace-nowrap shadow-sm"
+                  >
+                    <FolderOpen className="w-3.5 h-3.5" />
+                    <span>{isExploringPCloud ? 'Fechar Explorador' : 'Explorar Vídeos do pCloud'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleDisconnectPCloud}
+                    className="px-3 py-1.5 text-xs font-medium text-rose-400 hover:text-rose-300 hover:bg-rose-950/40 border border-rose-900/50 rounded-lg transition-colors whitespace-nowrap"
+                  >
+                    Desconectar pCloud
+                  </button>
+                </>
               ) : (
                 <button
                   type="button"
@@ -1519,6 +1727,437 @@ export const StorageSettings: React.FC<StorageSettingsProps> = ({
               </button>
             </div>
           </div>
+
+          {/* Interactive pCloud Folder & Video Explorer Panel */}
+          {pcloudStatus?.connected && isExploringPCloud && (
+            <div className="pt-4 border-t border-cyan-500/30 space-y-4">
+              {/* Explorer Header */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-neutral-950/80 p-4 rounded-xl border border-neutral-800">
+                <div className="space-y-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Film className="w-4 h-4 text-cyan-400" />
+                    <h4 className="text-sm font-bold text-white">Explorador de Arquivos do pCloud</h4>
+                    <span className="text-[11px] font-mono text-cyan-300 bg-cyan-950/60 px-2 py-0.5 rounded border border-cyan-800/50">
+                      {pcloudFiles.length} {pcloudFiles.length === 1 ? 'arquivo' : 'arquivos'}
+                    </span>
+                    {pcloudSubfolders.length > 0 && (
+                      <span className="text-[11px] font-mono text-amber-300 bg-amber-950/60 px-2 py-0.5 rounded border border-amber-800/50">
+                        {pcloudSubfolders.length} {pcloudSubfolders.length === 1 ? 'subpasta' : 'subpastas'}
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-xs text-neutral-400">
+                    <span className="text-cyan-400 font-mono flex items-center gap-1">
+                      <FolderOpen className="w-3 h-3 text-cyan-400" />
+                      Pasta Atual: <strong className="text-white">{pcloudCurrentFolderName}</strong> (ID: {pcloudCurrentFolderId})
+                    </span>
+                  </div>
+                </div>
+
+                {/* Explorer Controls: Search & Refresh */}
+                <div className="flex items-center gap-2 w-full sm:w-auto">
+                  <div className="relative flex-1 sm:w-64 min-w-0">
+                    <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-neutral-500" />
+                    <input
+                      type="text"
+                      placeholder="Pesquisar arquivo ou pasta..."
+                      value={pcloudSearchQuery}
+                      onChange={(e) => setPcloudSearchQuery(e.target.value)}
+                      className="w-full bg-neutral-900 border border-neutral-800 rounded-lg pl-8 pr-3 py-1.5 text-xs text-neutral-200 placeholder:text-neutral-600 focus:outline-none focus:border-cyan-500"
+                    />
+                    {pcloudSearchQuery && (
+                      <button
+                        type="button"
+                        onClick={() => setPcloudSearchQuery('')}
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-neutral-500 hover:text-neutral-300"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    )}
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => handleLoadPCloudFolder(pcloudCurrentFolderId, pcloudCurrentFolderName)}
+                    disabled={isLoadingPCloudFiles}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-neutral-200 bg-neutral-800 hover:bg-neutral-700 disabled:opacity-50 rounded-lg transition-colors shrink-0"
+                    title="Recarregar pasta do pCloud"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isLoadingPCloudFiles ? 'animate-spin' : ''}`} />
+                    <span className="hidden sm:inline">Atualizar</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Breadcrumb Path & Navigation Bar */}
+              <div className="flex flex-wrap items-center gap-2 p-2.5 rounded-lg bg-neutral-950/60 border border-neutral-800/80 text-xs">
+                {pcloudFolderBreadcrumbs.length > 1 && (
+                  <button
+                    type="button"
+                    onClick={handleGoBackPCloudFolder}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-cyan-300 bg-cyan-950/50 hover:bg-cyan-900/60 border border-cyan-800/50 rounded-md transition-colors"
+                  >
+                    <ArrowLeft className="w-3 h-3" />
+                    <span>Voltar</span>
+                  </button>
+                )}
+
+                <div className="flex flex-wrap items-center gap-1.5 min-w-0 flex-1">
+                  {pcloudFolderBreadcrumbs.map((crumb, idx) => {
+                    const isLast = idx === pcloudFolderBreadcrumbs.length - 1;
+                    return (
+                      <React.Fragment key={crumb.id + '-' + idx}>
+                        <button
+                          type="button"
+                          onClick={() => handleNavigatePCloudBreadcrumb(idx)}
+                          className={`font-mono text-xs px-2 py-0.5 rounded transition-colors ${
+                            isLast
+                              ? 'text-cyan-400 font-bold bg-cyan-950/60 border border-cyan-800/60'
+                              : 'text-neutral-400 hover:text-white hover:bg-neutral-900'
+                          }`}
+                        >
+                          {crumb.name}
+                        </button>
+                        {!isLast && <ChevronRight className="w-3.5 h-3.5 text-neutral-600 shrink-0" />}
+                      </React.Fragment>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Subfolders Grid (if any) */}
+              {pcloudSubfolders.length > 0 && (
+                <div className="space-y-2">
+                  <span className="text-[11px] uppercase font-bold text-neutral-400 tracking-wider flex items-center gap-1.5">
+                    <Folder className="w-3.5 h-3.5 text-amber-400" />
+                    Subpastas no pCloud ({pcloudSubfolders.length}):
+                  </span>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">
+                    {pcloudSubfolders.map((folder) => (
+                      <button
+                        key={folder.id}
+                        type="button"
+                        onClick={() => handleOpenPCloudSubfolder(folder.id, folder.name)}
+                        className="flex items-center justify-between p-2.5 rounded-lg bg-neutral-900/80 hover:bg-neutral-800/90 border border-neutral-800/80 hover:border-cyan-500/50 text-left transition-all group"
+                      >
+                        <div className="flex items-center gap-2 min-w-0 pr-2">
+                          <Folder className="w-4 h-4 text-amber-400 shrink-0 group-hover:text-amber-300" />
+                          <span className="text-xs font-semibold text-neutral-200 group-hover:text-cyan-300 truncate">
+                            {folder.name}
+                          </span>
+                        </div>
+                        <ChevronRight className="w-3.5 h-3.5 text-neutral-500 group-hover:text-cyan-400 shrink-0" />
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Error Banner */}
+              {pcloudFilesError && (
+                <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/20 text-xs text-rose-300 space-y-2">
+                  <div className="flex items-center gap-2 font-semibold">
+                    <AlertCircle className="w-4 h-4 shrink-0" />
+                    <span>Falha ao consultar pasta no pCloud</span>
+                  </div>
+                  <p className="text-neutral-400 leading-relaxed text-[11px]">
+                    {pcloudFilesError}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => handleLoadPCloudFolder(pcloudCurrentFolderId, pcloudCurrentFolderName)}
+                    className="inline-flex items-center gap-1.5 px-3 py-1 text-xs font-semibold text-rose-300 bg-rose-950/60 border border-rose-800/60 rounded-md hover:bg-rose-900/60 transition-colors"
+                  >
+                    <RefreshCw className="w-3 h-3" />
+                    <span>Tentar Novamente</span>
+                  </button>
+                </div>
+              )}
+
+              {/* Loading State */}
+              {isLoadingPCloudFiles && (
+                <div className="p-10 flex flex-col items-center justify-center gap-3 bg-neutral-950/40 rounded-xl border border-neutral-800">
+                  <RefreshCw className="w-7 h-7 text-cyan-400 animate-spin" />
+                  <p className="text-xs font-mono text-neutral-400">
+                    Consultando arquivos disponíveis na pasta #{pcloudCurrentFolderId} do pCloud...
+                  </p>
+                </div>
+              )}
+
+              {/* Content when loaded */}
+              {!isLoadingPCloudFiles && !pcloudFilesError && (
+                <div className="space-y-3">
+                  {/* Toolbar: Filters, Sorting & Selection Actions */}
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 p-3 rounded-xl bg-neutral-950/60 border border-neutral-800/80">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="text-[11px] font-medium text-neutral-400 mr-1 flex items-center gap-1">
+                        <Filter className="w-3 h-3 text-neutral-500" />
+                        Formato:
+                      </span>
+                      {['ALL', 'MKV', 'MP4', 'WEBM', 'AVI', 'TS'].map((fmt) => (
+                        <button
+                          key={fmt}
+                          type="button"
+                          onClick={() => setPcloudFormatFilter(fmt)}
+                          className={`px-2.5 py-1 text-xs font-medium rounded-lg transition-colors ${
+                            pcloudFormatFilter === fmt
+                              ? 'bg-cyan-400 text-neutral-950 font-semibold shadow-sm'
+                              : 'bg-neutral-900 text-neutral-300 hover:text-white border border-neutral-800'
+                          }`}
+                        >
+                          {fmt}
+                        </button>
+                      ))}
+                    </div>
+
+                    <div className="flex items-center gap-2 self-start sm:self-auto">
+                      <ArrowUpDown className="w-3.5 h-3.5 text-neutral-500" />
+                      <select
+                        value={pcloudSortBy}
+                        onChange={(e) => setPcloudSortBy(e.target.value as any)}
+                        className="bg-neutral-900 border border-neutral-800 rounded-lg px-2.5 py-1 text-xs text-neutral-200 focus:outline-none focus:border-cyan-500"
+                      >
+                        <option value="name-asc" className="bg-neutral-900 text-neutral-200">Nome (A-Z)</option>
+                        <option value="name-desc" className="bg-neutral-900 text-neutral-200">Nome (Z-A)</option>
+                        <option value="date-desc" className="bg-neutral-900 text-neutral-200">Mais Recente</option>
+                        <option value="size-desc" className="bg-neutral-900 text-neutral-200">Maior Tamanho</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  {/* Multi-Selection & Import Toolbar */}
+                  {selectedPCloudFileIds.size > 0 && (
+                    <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 p-3.5 rounded-xl bg-cyan-950/40 border border-cyan-500/40 text-xs">
+                      <div className="flex items-center gap-2 text-cyan-300 font-semibold">
+                        <CheckSquare className="w-4 h-4 text-cyan-400 shrink-0" />
+                        <span>
+                          {selectedPCloudFileIds.size} {selectedPCloudFileIds.size === 1 ? 'vídeo selecionado' : 'vídeos selecionados'}
+                        </span>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2">
+                        {/* Target Folder in NOVA STORAGE Library */}
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[11px] text-neutral-400">Destino:</span>
+                          <select
+                            value={pcloudTargetFolderId}
+                            onChange={(e) => setPcloudTargetFolderId(e.target.value)}
+                            className="bg-neutral-900 border border-neutral-700 rounded-lg px-2.5 py-1 text-xs text-white focus:outline-none focus:border-cyan-500"
+                          >
+                            <option value="">(Primeira pasta do catálogo)</option>
+                            {LocalCatalogService.getFolders().map((f) => (
+                              <option key={f.id} value={f.id}>
+                                {f.name}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={handleImportSelectedPCloudVideos}
+                          disabled={isImportingPCloud}
+                          className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-bold text-neutral-950 bg-cyan-400 hover:bg-cyan-300 active:bg-cyan-500 disabled:opacity-50 rounded-lg transition-colors shadow-sm"
+                        >
+                          <UploadCloud className={`w-3.5 h-3.5 ${isImportingPCloud ? 'animate-bounce' : ''}`} />
+                          <span>{isImportingPCloud ? 'Importando...' : 'Importar para a Biblioteca'}</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={handleToggleSelectAllVisiblePCloudFiles}
+                          className="px-2.5 py-1.5 text-xs font-medium text-neutral-200 hover:text-white bg-neutral-900 hover:bg-neutral-800 border border-neutral-700 rounded-lg transition-colors"
+                        >
+                          {isAllVisiblePCloudSelected ? 'Desmarcar visíveis' : 'Marcar visíveis'}
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => setSelectedPCloudFileIds(new Set())}
+                          className="px-2.5 py-1.5 text-xs font-medium text-rose-300 hover:text-rose-200 bg-rose-950/40 border border-rose-800/60 rounded-lg transition-colors"
+                        >
+                          Limpar
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Empty Folder Notice */}
+                  {filteredPCloudFiles.length === 0 && pcloudSubfolders.length === 0 && (
+                    <div className="p-8 text-center bg-neutral-950/40 rounded-xl border border-neutral-800 space-y-2">
+                      <FolderOpen className="w-8 h-8 text-neutral-600 mx-auto" />
+                      <h5 className="text-sm font-semibold text-neutral-300">Pasta vazia no pCloud</h5>
+                      <p className="text-xs text-neutral-500">
+                        Nenhum arquivo ou subpasta foi encontrado nesta pasta ({pcloudCurrentFolderName}).
+                      </p>
+                    </div>
+                  )}
+
+                  {/* Files List: Mobile Cards */}
+                  {filteredPCloudFiles.length > 0 && (
+                    <div className="space-y-2">
+                      <div className="block md:hidden space-y-2">
+                        {filteredPCloudFiles.map((file) => {
+                          const isSelected = selectedPCloudFileIds.has(file.id);
+                          return (
+                            <div
+                              key={file.id}
+                              className={`p-3.5 rounded-xl border transition-all ${
+                                isSelected
+                                  ? 'bg-cyan-950/30 border-cyan-500/50 shadow-sm'
+                                  : 'bg-neutral-950/60 border-neutral-800/80 hover:border-neutral-700'
+                              }`}
+                            >
+                              <div className="flex items-start gap-2.5">
+                                <button
+                                  type="button"
+                                  onClick={() => handleToggleSelectPCloudFile(file.id)}
+                                  className="mt-0.5 text-neutral-400 hover:text-cyan-400 transition-colors shrink-0"
+                                  aria-label={isSelected ? `Desmarcar ${file.name}` : `Selecionar ${file.name}`}
+                                >
+                                  {isSelected ? (
+                                    <CheckSquare className="w-4 h-4 text-cyan-400" />
+                                  ) : (
+                                    <Square className="w-4 h-4 text-neutral-500" />
+                                  )}
+                                </button>
+
+                                <div className="min-w-0 flex-1 space-y-1">
+                                  <h5
+                                    className="font-semibold text-xs text-neutral-100 break-words leading-snug cursor-pointer hover:text-cyan-300"
+                                    onClick={() => handleToggleSelectPCloudFile(file.id)}
+                                  >
+                                    {file.name}
+                                  </h5>
+                                  <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                                    <span className="font-mono font-bold px-1.5 py-0.5 rounded border text-[10px] bg-cyan-950/40 text-cyan-300 border-cyan-800/60">
+                                      {file.format}
+                                    </span>
+                                    <span className="font-mono text-neutral-400">
+                                      {PCloudStorageAdapter.formatBytes(file.sizeBytes)}
+                                    </span>
+                                    <span className="text-neutral-500">
+                                      · Modificado: {PCloudStorageAdapter.formatDate(file.modifiedTime)}
+                                    </span>
+                                  </div>
+                                </div>
+                              </div>
+
+                              <div className="flex items-center gap-2 pt-2 mt-2 border-t border-neutral-800/60">
+                                <button
+                                  type="button"
+                                  onClick={() => setSelectedPCloudVideo({ id: file.id, name: file.name, sizeBytes: file.sizeBytes, format: file.format, modifiedTime: file.modifiedTime })}
+                                  className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-neutral-950 bg-cyan-400 hover:bg-cyan-300 rounded-lg transition-colors"
+                                >
+                                  <Play className="w-3.5 h-3.5 fill-current" />
+                                  <span>Testar Player</span>
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {/* Files List: Desktop Table */}
+                      <div className="hidden md:block rounded-xl border border-neutral-800 overflow-hidden bg-neutral-950/50">
+                        <table className="w-full text-left text-xs text-neutral-300 min-w-[640px]">
+                          <thead className="bg-neutral-900/80 border-b border-neutral-800 text-[11px] uppercase font-bold text-neutral-400 tracking-wider">
+                            <tr>
+                              <th className="py-2.5 px-3 w-10 text-center">
+                                <button
+                                  type="button"
+                                  onClick={handleToggleSelectAllVisiblePCloudFiles}
+                                  className="text-neutral-400 hover:text-cyan-400 transition-colors inline-flex items-center justify-center"
+                                  title={isAllVisiblePCloudSelected ? 'Desmarcar todos os visíveis' : 'Selecionar todos os visíveis'}
+                                >
+                                  {isAllVisiblePCloudSelected ? (
+                                    <CheckSquare className="w-4 h-4 text-cyan-400" />
+                                  ) : (
+                                    <Square className="w-4 h-4 text-neutral-500" />
+                                  )}
+                                </button>
+                              </th>
+                              <th className="py-2.5 px-3">Nome do Arquivo</th>
+                              <th className="py-2.5 px-3 w-24">Formato</th>
+                              <th className="py-2.5 px-3 w-28">Tamanho</th>
+                              <th className="py-2.5 px-3 w-36">Modificado</th>
+                              <th className="py-2.5 px-3 w-36 text-right">Ações</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-neutral-800/60 font-sans">
+                            {filteredPCloudFiles.map((file) => {
+                              const isSelected = selectedPCloudFileIds.has(file.id);
+                              return (
+                                <tr
+                                  key={file.id}
+                                  className={`transition-colors ${
+                                    isSelected
+                                      ? 'bg-cyan-950/25 hover:bg-cyan-950/35'
+                                      : 'hover:bg-neutral-900/50'
+                                  }`}
+                                >
+                                  <td className="py-3 px-3 text-center">
+                                    <button
+                                      type="button"
+                                      onClick={() => handleToggleSelectPCloudFile(file.id)}
+                                      className="text-neutral-400 hover:text-cyan-400 transition-colors inline-flex items-center justify-center"
+                                      aria-label={isSelected ? `Desmarcar ${file.name}` : `Selecionar ${file.name}`}
+                                    >
+                                      {isSelected ? (
+                                        <CheckSquare className="w-4 h-4 text-cyan-400" />
+                                      ) : (
+                                        <Square className="w-4 h-4 text-neutral-600 hover:text-neutral-400" />
+                                      )}
+                                    </button>
+                                  </td>
+                                  <td className="py-3 px-3">
+                                    <div className="flex items-center gap-2.5 min-w-0">
+                                      <div className="w-7 h-7 rounded bg-neutral-900 border border-neutral-800 flex items-center justify-center text-cyan-400 shrink-0">
+                                        <Film className="w-3.5 h-3.5" />
+                                      </div>
+                                      <span
+                                        className="font-medium text-neutral-100 truncate block max-w-xs lg:max-w-md cursor-pointer hover:text-cyan-300"
+                                        onClick={() => handleToggleSelectPCloudFile(file.id)}
+                                        title={file.name}
+                                      >
+                                        {file.name}
+                                      </span>
+                                    </div>
+                                  </td>
+                                  <td className="py-3 px-3">
+                                    <span className="font-mono text-[11px] font-bold text-cyan-300 bg-cyan-950/50 px-2 py-0.5 rounded border border-cyan-800/50">
+                                      {file.format}
+                                    </span>
+                                  </td>
+                                  <td className="py-3 px-3 font-mono text-neutral-400">
+                                    {PCloudStorageAdapter.formatBytes(file.sizeBytes)}
+                                  </td>
+                                  <td className="py-3 px-3 text-neutral-400 text-[11px]">
+                                    {PCloudStorageAdapter.formatDate(file.modifiedTime)}
+                                  </td>
+                                  <td className="py-3 px-3 text-right">
+                                    <button
+                                      type="button"
+                                      onClick={() => setSelectedPCloudVideo({ id: file.id, name: file.name, sizeBytes: file.sizeBytes, format: file.format, modifiedTime: file.modifiedTime })}
+                                      className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-neutral-950 bg-cyan-400 hover:bg-cyan-300 rounded-md transition-colors"
+                                      title="Testar player de streaming pCloud"
+                                    >
+                                      <Play className="w-3 h-3 fill-current" />
+                                      <span>Player</span>
+                                    </button>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         {/* 3. MEGA Card */}
@@ -1658,6 +2297,13 @@ export const StorageSettings: React.FC<StorageSettingsProps> = ({
         video={selectedDriveVideo}
         isOpen={Boolean(selectedDriveVideo)}
         onClose={() => setSelectedDriveVideo(null)}
+      />
+
+      {/* pCloud Video Player Modal */}
+      <PCloudVideoPlayerModal
+        video={selectedPCloudVideo}
+        isOpen={Boolean(selectedPCloudVideo)}
+        onClose={() => setSelectedPCloudVideo(null)}
       />
     </div>
   );

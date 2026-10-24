@@ -913,4 +913,265 @@ export class PCloudService {
       };
     }
   }
+
+  /**
+   * Infere o container/formato de vídeo a partir do nome e MIME type
+   */
+  public static inferVideoFormat(fileName: string, mimeType?: string): string {
+    const lowerName = fileName.toLowerCase();
+    if (lowerName.endsWith('.mkv')) return 'MKV';
+    if (lowerName.endsWith('.mp4') || lowerName.endsWith('.m4v')) return 'MP4';
+    if (lowerName.endsWith('.webm')) return 'WEBM';
+    if (lowerName.endsWith('.avi')) return 'AVI';
+    if (lowerName.endsWith('.ts')) return 'TS';
+    if (lowerName.endsWith('.mov')) return 'MOV';
+    if (mimeType?.includes('matroska')) return 'MKV';
+    if (mimeType?.includes('mp4')) return 'MP4';
+    if (mimeType?.includes('webm')) return 'WEBM';
+    return 'MP4';
+  }
+
+  /**
+   * Lista o conteúdo de uma pasta remota do pCloud via API oficial 'listfolder'.
+   * Inicia na raiz (folderid=0) e permite navegar recursivamente entre pastas.
+   * Auto-autoriza os IDs dos arquivos no catálogo em memória para permitir streaming imediato.
+   */
+  public static async listFolder(
+    folderId: number = 0,
+    session?: UserSessionData,
+    options?: {
+      videosOnly?: boolean;
+    }
+  ): Promise<{
+    success: boolean;
+    code?: string;
+    folderId: number;
+    folderName: string;
+    parentFolderId?: number | null;
+    path?: string;
+    folders: Array<{
+      id: string;
+      folderId: number;
+      name: string;
+      parentFolderId?: number;
+      modifiedTime?: string;
+      createdTime?: string;
+    }>;
+    files: Array<{
+      id: string;
+      fileId: number;
+      name: string;
+      sizeBytes: number;
+      mimeType: string;
+      isVideo: boolean;
+      format: string;
+      category?: number;
+      modifiedTime?: string;
+      createdTime?: string;
+      parentFolderId?: number;
+    }>;
+    totalFolders: number;
+    totalFiles: number;
+    error?: string;
+  }> {
+    const token = this.getAccessToken(session);
+
+    if (!token) {
+      return {
+        success: false,
+        code: 'NOT_CONFIGURED',
+        folderId,
+        folderName: '/',
+        folders: [],
+        files: [],
+        totalFolders: 0,
+        totalFiles: 0,
+        error: 'Variável de ambiente PCLOUD_ACCESS_TOKEN não configurada no servidor Vercel.'
+      };
+    }
+
+    const cleanFolderId = Number.isInteger(folderId) && folderId >= 0 ? folderId : 0;
+    const host = this.getApiHost(session);
+    const params = new URLSearchParams();
+    params.set('folderid', String(cleanFolderId));
+    params.set('recursive', '0');
+    params.set('showdeleted', '0');
+    params.set('noshares', '0');
+
+    const endpoint = `https://${host}/listfolder?${params.toString()}`;
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), this.REQUEST_TIMEOUT_MS);
+
+    try {
+      const response = await fetch(endpoint, {
+        method: 'GET',
+        headers: {
+          'Accept': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        signal: controller.signal
+      });
+
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        return {
+          success: false,
+          code: 'API_ERROR',
+          folderId: cleanFolderId,
+          folderName: '/',
+          folders: [],
+          files: [],
+          totalFolders: 0,
+          totalFiles: 0,
+          error: `O servidor pCloud retornou status HTTP ${response.status}.`
+        };
+      }
+
+      const data = await response.json();
+
+      if (data.result === 0 && data.metadata) {
+        const meta = data.metadata;
+        const currentFolderName = meta.name || (cleanFolderId === 0 ? '/' : `Pasta #${cleanFolderId}`);
+        const parentFolderId = typeof meta.parentfolderid === 'number' ? meta.parentfolderid : null;
+        const path = meta.path || '/';
+
+        const contents: any[] = Array.isArray(meta.contents) ? meta.contents : [];
+        const foldersList: Array<{
+          id: string;
+          folderId: number;
+          name: string;
+          parentFolderId?: number;
+          modifiedTime?: string;
+          createdTime?: string;
+        }> = [];
+
+        const filesList: Array<{
+          id: string;
+          fileId: number;
+          name: string;
+          sizeBytes: number;
+          mimeType: string;
+          isVideo: boolean;
+          format: string;
+          category?: number;
+          modifiedTime?: string;
+          createdTime?: string;
+          parentFolderId?: number;
+        }> = [];
+
+        for (const item of contents) {
+          if (item.isfolder) {
+            foldersList.push({
+              id: String(item.folderid),
+              folderId: item.folderid,
+              name: item.name || `Pasta ${item.folderid}`,
+              parentFolderId: typeof item.parentfolderid === 'number' ? item.parentfolderid : cleanFolderId,
+              modifiedTime: item.modified || undefined,
+              createdTime: item.created || undefined
+            });
+          } else {
+            const fileName = String(item.name || 'Arquivo');
+            const mimeType = String(item.contenttype || 'application/octet-stream');
+            const isVideo = item.category === 3 || mimeType.startsWith('video/') || /\.(mp4|mkv|webm|avi|mov|m4v|wmv|flv|ts|3gp)$/i.test(fileName);
+
+            if (options?.videosOnly && !isVideo) {
+              continue;
+            }
+
+            const cleanId = String(item.fileid);
+            // Auto-autoriza o fileId no catálogo em memória para emissão subsequente de link direto
+            this.authorizedFiles.add(cleanId);
+
+            filesList.push({
+              id: cleanId,
+              fileId: item.fileid,
+              name: fileName,
+              sizeBytes: typeof item.size === 'number' ? item.size : 0,
+              mimeType,
+              isVideo,
+              format: this.inferVideoFormat(fileName, mimeType),
+              category: typeof item.category === 'number' ? item.category : undefined,
+              modifiedTime: item.modified || undefined,
+              createdTime: item.created || undefined,
+              parentFolderId: typeof item.parentfolderid === 'number' ? item.parentfolderid : cleanFolderId
+            });
+          }
+        }
+
+        // Ordenar pastas alfabeticamente
+        foldersList.sort((a, b) => a.name.localeCompare(b.name, 'pt-BR', { sensitivity: 'base' }));
+
+        return {
+          success: true,
+          folderId: cleanFolderId,
+          folderName: currentFolderName,
+          parentFolderId,
+          path,
+          folders: foldersList,
+          files: filesList,
+          totalFolders: foldersList.length,
+          totalFiles: filesList.length
+        };
+      }
+
+      if (data.result === 1000 || data.result === 2000) {
+        return {
+          success: false,
+          code: 'AUTH_FAILED',
+          folderId: cleanFolderId,
+          folderName: '/',
+          folders: [],
+          files: [],
+          totalFolders: 0,
+          totalFiles: 0,
+          error: 'Autenticação pCloud inválida ou token expirado.'
+        };
+      }
+
+      if (data.result === 2005) {
+        return {
+          success: false,
+          code: 'FOLDER_NOT_FOUND',
+          folderId: cleanFolderId,
+          folderName: '/',
+          folders: [],
+          files: [],
+          totalFolders: 0,
+          totalFiles: 0,
+          error: `Pasta de ID ${cleanFolderId} não encontrada no pCloud.`
+        };
+      }
+
+      return {
+        success: false,
+        code: 'API_ERROR',
+        folderId: cleanFolderId,
+        folderName: '/',
+        folders: [],
+        files: [],
+        totalFolders: 0,
+        totalFiles: 0,
+        error: data.error || `Erro retornado pelo pCloud (código ${data.result}).`
+      };
+    } catch (err: any) {
+      clearTimeout(timeoutId);
+      const isTimeout = err?.name === 'AbortError' || String(err?.message).toLowerCase().includes('timeout');
+      return {
+        success: false,
+        code: 'NETWORK_ERROR',
+        folderId: cleanFolderId,
+        folderName: '/',
+        folders: [],
+        files: [],
+        totalFolders: 0,
+        totalFiles: 0,
+        error: isTimeout
+          ? 'Tempo limite de resposta excedido ao listar pasta no pCloud (timeout 8s).'
+          : 'Falha de rede ao contatar a API oficial do pCloud.'
+      };
+    }
+  }
 }
+
