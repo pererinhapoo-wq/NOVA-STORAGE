@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import { PCloudService } from '../src/server/services/pcloudService.ts';
 import { PCloudStorageAdapter } from '../src/services/storage/providers/pcloudAdapter.ts';
 import { pcloudRouter } from '../src/server/routes/pcloud.ts';
 import { DriveAuthService } from '../src/server/services/driveAuthService.ts';
+import { app } from '../src/server/app.ts';
 
 test('Segurança e Autenticação Administrativa das Rotas pCloud - Etapa 3', async (t) => {
   const originalEnv = { ...process.env };
@@ -2058,4 +2060,420 @@ test('Conexão OAuth 2.0 Oficial do pCloud na NOVA STORAGE', async (t) => {
     assert.strictEqual(creds.redirectUri, EXPECTED_URI);
   });
 });
+
+function invokeExpressApp(
+  expressApp: any,
+  options: {
+    method?: string;
+    url: string;
+    headers?: Record<string, string>;
+    signedCookies?: Record<string, string>;
+    cookies?: Record<string, string>;
+    body?: any;
+  }
+): Promise<{ statusCode: number; headers: Record<string, any>; body: string; json?: any }> {
+  return new Promise((resolve) => {
+    let statusCode = 200;
+    const responseHeaders: Record<string, any> = {};
+    let responseBody = '';
+    let finished = false;
+
+    const parsedUrl = new URL(options.url, 'http://localhost');
+    const queryObj: Record<string, any> = {};
+    parsedUrl.searchParams.forEach((v, k) => {
+      queryObj[k] = v;
+    });
+
+    const req: any = new EventEmitter();
+    req.method = options.method || 'GET';
+    req.url = options.url;
+    req.originalUrl = options.url;
+    req.headers = { ...(options.headers || {}) };
+    req.cookies = options.cookies ? { ...options.cookies } : {};
+    req.signedCookies = options.signedCookies ? { ...options.signedCookies } : {};
+    req._initialSignedCookies = options.signedCookies ? { ...options.signedCookies } : undefined;
+    req.body = options.body || {};
+    req.query = queryObj;
+
+    const res: any = new EventEmitter();
+    res.statusCode = 200;
+    res.status = function (code: number) {
+      statusCode = code;
+      this.statusCode = code;
+      return this;
+    };
+    res.setHeader = function (name: string, value: any) {
+      responseHeaders[name.toLowerCase()] = value;
+      return this;
+    };
+    res.getHeader = function (name: string) {
+      return responseHeaders[name.toLowerCase()];
+    };
+    res.cookie = function () {
+      return this;
+    };
+    res.send = function (body: any) {
+      if (typeof body === 'object') {
+        responseBody = JSON.stringify(body);
+      } else {
+        responseBody = String(body);
+      }
+      finish();
+      return this;
+    };
+    res.json = function (data: any) {
+      responseBody = JSON.stringify(data);
+      finish();
+      return this;
+    };
+    res.end = function (chunk?: any) {
+      if (chunk) responseBody = String(chunk);
+      finish();
+      return this;
+    };
+
+    function finish() {
+      if (finished) return;
+      finished = true;
+      let parsedJson: any = undefined;
+      try {
+        parsedJson = JSON.parse(responseBody);
+      } catch {
+        // text/html
+      }
+      resolve({
+        statusCode,
+        headers: responseHeaders,
+        body: responseBody,
+        json: parsedJson
+      });
+    }
+
+    expressApp(req, res, (err?: any) => {
+      if (err) {
+        statusCode = 500;
+        responseBody = String(err.message || err);
+      } else {
+        statusCode = 404;
+        responseBody = `Cannot ${req.method} ${req.url}`;
+      }
+      finish();
+    });
+  });
+}
+
+test('Validação de Rota Completa no Express: /api/storage/pcloud/callback', async (t) => {
+  const originalEnv = { ...process.env };
+  const PROD_REDIRECT_URI = 'https://nova-storage-bboehj89h-pererinhapoo-2486.vercel.app/api/storage/pcloud/callback';
+
+  t.beforeEach(() => {
+    DriveAuthService.setRedisClient(null);
+    DriveAuthService.resetInMemoryDevStore();
+    PCloudService.resetAuthorizedFiles();
+    process.env.PCLOUD_CLIENT_ID = 'test_pcloud_client_id_123';
+    process.env.PCLOUD_CLIENT_SECRET = 'test_pcloud_client_secret_456';
+    process.env.PCLOUD_REDIRECT_URI = PROD_REDIRECT_URI;
+    process.env.SESSION_SECRET = 'secure_32_characters_session_secret_test';
+  });
+
+  t.afterEach(() => {
+    process.env = { ...originalEnv };
+    DriveAuthService.setRedisClient(null);
+    DriveAuthService.resetInMemoryDevStore();
+    PCloudService.resetAuthorizedFiles();
+  });
+
+  // 1. Rota completa no Express
+  await t.test('1. A rota oficial /api/storage/pcloud/callback está REALMENTE montada no app Express e não retorna 404', async () => {
+    // Chamada sem parâmetros deve retornar 400 (Parâmetros ausentes), NUNCA 404 (Cannot GET)
+    const res = await invokeExpressApp(app, {
+      method: 'GET',
+      url: '/api/storage/pcloud/callback'
+    });
+
+    assert.notStrictEqual(res.statusCode, 404, 'A rota /api/storage/pcloud/callback NÃO pode retornar 404 Cannot GET');
+    assert.strictEqual(res.statusCode, 400);
+    assert.match(res.body, /Parâmetros ausentes no retorno OAuth do pCloud/);
+  });
+
+  // 2. Alias /api/storage/callback e prefixo serverless /storage/pcloud/callback
+  await t.test('2. Aliases /api/storage/callback e /storage/pcloud/callback atingem o mesmo handler sem 404', async () => {
+    const res1 = await invokeExpressApp(app, {
+      method: 'GET',
+      url: '/api/storage/callback'
+    });
+    assert.notStrictEqual(res1.statusCode, 404, 'Alias /api/storage/callback não deve retornar 404');
+    assert.strictEqual(res1.statusCode, 400);
+
+    const res2 = await invokeExpressApp(app, {
+      method: 'GET',
+      url: '/storage/pcloud/callback'
+    });
+    assert.notStrictEqual(res2.statusCode, 404, 'Prefixo serverless /storage/pcloud/callback não deve retornar 404');
+    assert.strictEqual(res2.statusCode, 400);
+  });
+
+  // 3. Validação de erro retornado pelo pCloud (ex: cancelamento)
+  await t.test('3. Trata erro retornado diretamente pelo pCloud (?error=access_denied) com HTTP 400 e postMessage', async () => {
+    const res = await invokeExpressApp(app, {
+      method: 'GET',
+      url: '/api/storage/pcloud/callback?error=access_denied'
+    });
+
+    assert.strictEqual(res.statusCode, 400);
+    assert.match(res.body, /Autorização Cancelada ou Recusada/);
+    assert.match(res.body, /access_denied/);
+    assert.match(res.body, /PCLOUD_OAUTH_ERROR/);
+    assert.match(res.body, /window\.close\(\)/);
+  });
+
+  // 4. Validação de sessão ausente ou inválida
+  await t.test('4. Rejeita callback com HTTP 400 quando o cookie de sessão não é fornecido ou é inválido', async () => {
+    const res = await invokeExpressApp(app, {
+      method: 'GET',
+      url: '/api/storage/pcloud/callback?code=some_code&state=some_state'
+    });
+
+    assert.strictEqual(res.statusCode, 400);
+    assert.match(res.body, /Sessão inválida ou expirada para processar o retorno OAuth do pCloud/);
+  });
+
+  // 5. Validação anti-CSRF: state incorreto
+  await t.test('5. Rejeita com erro CSRF quando state não coincide com a sessão e NÃO chama endpoint de troca de token', async () => {
+    const session = await DriveAuthService.createSession();
+    session.role = 'admin';
+    session.pcloudCsrfState = 'expected_secure_state_token_123';
+    session.pcloudCsrfExpiresAt = Date.now() + 600000;
+    await DriveAuthService.saveSession(session);
+
+    let tokenEndpointCalled = false;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (input: any) => {
+      const url = String(input);
+      if (url.includes('/oauth2_token')) {
+        tokenEndpointCalled = true;
+      }
+      return originalFetch(input);
+    };
+
+    try {
+      const res = await invokeExpressApp(app, {
+        method: 'GET',
+        url: '/api/storage/pcloud/callback?code=valid_code_abc&state=wrong_attacker_state_xyz',
+        signedCookies: {
+          [DriveAuthService.COOKIE_NAME]: session.id
+        }
+      });
+
+      assert.strictEqual(res.statusCode, 400);
+      assert.strictEqual(tokenEndpointCalled, false, 'Endpoint de token não pode ser chamado se CSRF falhar');
+      assert.match(res.body, /Validação CSRF falhou/);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  // 6. Validação anti-CSRF: state expirado
+  await t.test('6. Rejeita com erro CSRF quando a solicitação expirou (> 10 minutos)', async () => {
+    const session = await DriveAuthService.createSession();
+    session.role = 'admin';
+    session.pcloudCsrfState = 'expired_state_token_456';
+    session.pcloudCsrfExpiresAt = Date.now() - 1000; // expirado há 1s
+    await DriveAuthService.saveSession(session);
+
+    let tokenEndpointCalled = false;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (input: any) => {
+      if (String(input).includes('/oauth2_token')) {
+        tokenEndpointCalled = true;
+      }
+      return originalFetch(input);
+    };
+
+    try {
+      const res = await invokeExpressApp(app, {
+        method: 'GET',
+        url: '/api/storage/pcloud/callback?code=valid_code_abc&state=expired_state_token_456',
+        signedCookies: {
+          [DriveAuthService.COOKIE_NAME]: session.id
+        }
+      });
+
+      assert.strictEqual(res.statusCode, 400);
+      assert.strictEqual(tokenEndpointCalled, false);
+      assert.match(res.body, /Validação CSRF falhou/);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  // 7. Sucesso completo: Europa (locationid=2, hostname=eapi.pcloud.com)
+  await t.test('7. Sucesso na rota completa com servidor regional Europa (locationid=2): troca token, persiste na sessão e fecha popup', async () => {
+    const session = await DriveAuthService.createSession();
+    session.role = 'admin';
+    const csrfState = 'valid_session_csrf_state_token_789';
+    session.pcloudCsrfState = csrfState;
+    session.pcloudCsrfExpiresAt = Date.now() + 600000;
+    await DriveAuthService.saveSession(session);
+
+    let exchangedUrl = '';
+    let exchangedBody: any = null;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (input: any, init?: any) => {
+      const url = String(input);
+      if (url.includes('/oauth2_token')) {
+        exchangedUrl = url;
+        exchangedBody = init?.body ? Object.fromEntries(new URLSearchParams(init.body)) : null;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            result: 0,
+            access_token: 'pcloud_live_eu_access_token_secret_xyz',
+            token_type: 'bearer',
+            userid: 1234567,
+            locationid: 2,
+            hostname: 'eapi.pcloud.com'
+          })
+        } as any;
+      }
+      return originalFetch(input, init);
+    };
+
+    try {
+      const res = await invokeExpressApp(app, {
+        method: 'GET',
+        url: `/api/storage/pcloud/callback?code=auth_code_eu_123&state=${csrfState}&locationid=2&hostname=eapi.pcloud.com`,
+        signedCookies: {
+          [DriveAuthService.COOKIE_NAME]: session.id
+        }
+      });
+
+      assert.strictEqual(res.statusCode, 200);
+      assert.match(res.body, /pCloud Conectado com Sucesso!/);
+      assert.match(res.body, /eapi\.pcloud\.com/);
+      assert.match(res.body, /PCLOUD_OAUTH_COMPLETED/);
+      assert.match(res.body, /window\.close\(\)/);
+
+      // Verifica chamada correta ao endpoint regional do pCloud
+      assert.strictEqual(exchangedUrl, 'https://eapi.pcloud.com/oauth2_token');
+      assert.strictEqual(exchangedBody?.client_id, 'test_pcloud_client_id_123');
+      assert.strictEqual(exchangedBody?.client_secret, 'test_pcloud_client_secret_456');
+      assert.strictEqual(exchangedBody?.code, 'auth_code_eu_123');
+
+      // Verifica persistência na sessão
+      const updatedSession = await DriveAuthService.getValidSession(session.id);
+      assert.ok(updatedSession);
+      assert.strictEqual(updatedSession?.pcloudTokens?.accessToken, 'pcloud_live_eu_access_token_secret_xyz');
+      assert.strictEqual(updatedSession?.pcloudTokens?.locationId, 2);
+      assert.strictEqual(updatedSession?.pcloudTokens?.hostname, 'eapi.pcloud.com');
+      // State anti-CSRF deve ser invalidado para impedir replay
+      assert.strictEqual(updatedSession?.pcloudCsrfState, null);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  // 8. Sucesso completo: Global/US (locationid=1, hostname=api.pcloud.com)
+  await t.test('8. Sucesso na rota completa com servidor Global/US (locationid=1): troca token e persiste na sessão', async () => {
+    const session = await DriveAuthService.createSession();
+    session.role = 'admin';
+    const csrfState = 'valid_session_csrf_state_token_global';
+    session.pcloudCsrfState = csrfState;
+    session.pcloudCsrfExpiresAt = Date.now() + 600000;
+    await DriveAuthService.saveSession(session);
+
+    let exchangedUrl = '';
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (input: any) => {
+      const url = String(input);
+      if (url.includes('/oauth2_token')) {
+        exchangedUrl = url;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            result: 0,
+            access_token: 'pcloud_live_us_access_token_secret_abc',
+            token_type: 'bearer',
+            userid: 9876543,
+            locationid: 1,
+            hostname: 'api.pcloud.com'
+          })
+        } as any;
+      }
+      return originalFetch(input);
+    };
+
+    try {
+      const res = await invokeExpressApp(app, {
+        method: 'GET',
+        url: `/api/storage/pcloud/callback?code=auth_code_us_456&state=${csrfState}&locationid=1&hostname=api.pcloud.com`,
+        signedCookies: {
+          [DriveAuthService.COOKIE_NAME]: session.id
+        }
+      });
+
+      assert.strictEqual(res.statusCode, 200);
+      assert.match(res.body, /pCloud Conectado com Sucesso!/);
+      assert.strictEqual(exchangedUrl, 'https://api.pcloud.com/oauth2_token');
+
+      const updatedSession = await DriveAuthService.getValidSession(session.id);
+      assert.strictEqual(updatedSession?.pcloudTokens?.accessToken, 'pcloud_live_us_access_token_secret_abc');
+      assert.strictEqual(updatedSession?.pcloudTokens?.locationId, 1);
+      assert.strictEqual(updatedSession?.pcloudTokens?.hostname, 'api.pcloud.com');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  // 9. Defesa SSRF: host malicioso nos parâmetros do callback
+  await t.test('9. Defesa SSRF: hostname malicioso vindo do cliente ou query é sanitizado e não direciona chamada a hosts arbitrários', async () => {
+    const session = await DriveAuthService.createSession();
+    session.role = 'admin';
+    const csrfState = 'csrf_state_ssrf_test';
+    session.pcloudCsrfState = csrfState;
+    session.pcloudCsrfExpiresAt = Date.now() + 600000;
+    await DriveAuthService.saveSession(session);
+
+    let exchangedUrl = '';
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (input: any) => {
+      const url = String(input);
+      if (url.includes('/oauth2_token')) {
+        exchangedUrl = url;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            result: 0,
+            access_token: 'token_after_ssrf_defense',
+            token_type: 'bearer',
+            userid: 112233
+          })
+        } as any;
+      }
+      return originalFetch(input);
+    };
+
+    try {
+      const res = await invokeExpressApp(app, {
+        method: 'GET',
+        // Injeção de host malicioso ou loopback
+        url: `/api/storage/pcloud/callback?code=code_ssrf&state=${csrfState}&hostname=malicious.attacker.com`,
+        signedCookies: {
+          [DriveAuthService.COOKIE_NAME]: session.id
+        }
+      });
+
+      assert.strictEqual(res.statusCode, 200);
+      // O host malicioso foi rejeitado e o sistema usou o DEFAULT_API_HOST (api.pcloud.com)
+      assert.strictEqual(exchangedUrl, 'https://api.pcloud.com/oauth2_token');
+      assert.doesNotMatch(exchangedUrl, /malicious\.attacker\.com/);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
 

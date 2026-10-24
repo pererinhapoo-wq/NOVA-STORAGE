@@ -296,19 +296,20 @@ pcloudRouter.get('/pcloud/auth-url', async (req: Request, res: Response) => {
 });
 
 /**
- * GET /api/storage/pcloud/callback
+ * GET /api/storage/pcloud/callback (e aliases /api/storage/callback)
  * Endpoint oficial de redirecionamento OAuth 2.0 do pCloud.
  * 
  * Medidas Estritas de Segurança:
+ * - Registra explicitamente os handlers para /callback e /pcloud/callback.
  * - Valida parâmetro state contra o armazenado na sessão do usuário (anti-CSRF).
  * - Executa a troca de authorization code por token EXCLUSIVAMENTE no servidor.
  * - Trata locationid (1 = US, 2 = EU) e valida hostname contra domínio confiável (*.pcloud.com).
  * - NUNCA expõe o access_token, client_secret ou PCLOUD_ADMIN_TOKEN no HTML, URL ou logs.
  * - Emite postMessage restrito à origem confiável do aplicativo e fecha a janela popup.
  */
-pcloudRouter.get(['/pcloud/callback', '/pcloud/callback/'], async (req: Request, res: Response) => {
-  const code = req.query.code as string | undefined;
-  const state = req.query.state as string | undefined;
+pcloudRouter.get(['/pcloud/callback', '/pcloud/callback/', '/callback', '/callback/'], async (req: Request, res: Response) => {
+  const code = typeof req.query.code === 'string' ? req.query.code.trim() : undefined;
+  const state = typeof req.query.state === 'string' ? req.query.state.trim() : undefined;
   const oauthError = req.query.error as string | undefined;
   const trustedOrigin = PCloudService.getTrustedOrigin();
 
@@ -390,8 +391,10 @@ pcloudRouter.get(['/pcloud/callback', '/pcloud/callback/'], async (req: Request,
   }
 
   // 4. Validação do state e troca do código pelo token no backend
-  const locationIdParam = req.query.locationid ? Number(req.query.locationid) : undefined;
-  const hostnameParam = typeof req.query.hostname === 'string' ? req.query.hostname.trim() : undefined;
+  const rawLocationId = req.query.locationid || req.query.locationId;
+  const locationIdParam = rawLocationId ? Number(rawLocationId) : undefined;
+  const rawHostname = req.query.hostname || req.query.host;
+  const hostnameParam = typeof rawHostname === 'string' ? rawHostname.trim() : undefined;
   const hints = (locationIdParam || hostnameParam) ? { locationId: locationIdParam, hostname: hostnameParam } : undefined;
 
   const result = await PCloudService.handleOAuthCallback(session, code, state, hints);

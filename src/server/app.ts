@@ -36,20 +36,33 @@ app.use((req, _res, next) => {
   if (!req.signedCookies) {
     req.signedCookies = Object.create(null);
   }
+  if ((req as any)._initialSignedCookies) {
+    Object.assign(req.signedCookies, (req as any)._initialSignedCookies);
+  }
+  next();
+});
+
+// Normalização de rota para ambientes serverless (ex: Vercel)
+app.use((req, _res, next) => {
+  if (req.url && !req.url.startsWith('/api')) {
+    if (req.url.startsWith('/storage') || req.url.startsWith('/health')) {
+      req.url = `/api${req.url}`;
+    }
+  }
   next();
 });
 
 // Health route is always accessible and does not require session cookies or Redis
-app.use('/api', healthRouter);
+app.use(['/api', '/health'], healthRouter);
 
 // Media inspection route with SSRF protection (does not require Drive OAuth credentials)
-app.use('/api/storage', mediaInspectRouter);
+app.use(['/api/storage', '/storage'], mediaInspectRouter);
 
 // pCloud storage route (uses server-side PCLOUD_ACCESS_TOKEN, decoupled from Drive OAuth and Redis)
-app.use('/api/storage', pcloudRouter);
+app.use(['/api/storage', '/storage'], pcloudRouter);
 
 // Middleware for storage routes: validates production SESSION_SECRET and Upstash config with controlled HTTP response
-app.use('/api/storage', (req, res, next) => {
+app.use(['/api/storage', '/storage'], (req, res, next) => {
   if (isProduction) {
     const secretStatus = resolveSessionSecret();
     if (!secretStatus.configured) {
@@ -81,6 +94,6 @@ app.use('/api/storage', (req, res, next) => {
   next();
 });
 
-app.use('/api/storage', driveRouter);
+app.use(['/api/storage', '/storage'], driveRouter);
 
 export default app;
