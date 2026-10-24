@@ -210,7 +210,7 @@ test('Validação Robusta de Fontes de Vídeo, Links Temporários e Sanitizaçã
       url: 'https://cdn.sem-cors.com/stream.m3u8',
       format: 'HLS',
       discoveryMethod: 'source_tag',
-      corsSupported: false, // Evidência clara de ausência de CORS
+      corsSupported: false, // Evidência clara de ausência de CORS para HLS
       accessible: true,
       statusCode: 200
     };
@@ -224,6 +224,36 @@ test('Validação Robusta de Fontes de Vídeo, Links Temporários e Sanitizaçã
     assert.strictEqual(evaluation.state, 'playback_failed');
     assert.strictEqual(evaluation.stateLabel, '6. Falha de Reprodução com Causa Evidente');
     assert.ok(evaluation.evidence.some(e => e.includes('Access-Control-Allow-Origin')));
+  });
+
+  await t.test('12.1. MP4 nativo sem CORS não recebe falso diagnóstico de falha por CORS', () => {
+    const source: ExtractedMediaSource = {
+      url: 'https://cdn.exemplo.com/video.mp4',
+      format: 'MP4',
+      discoveryMethod: 'direct_stream',
+      corsSupported: false, // Servidor não declarou CORS, mas MP4 nativo em <video> não depende de CORS
+      accessible: true,
+      statusCode: 206,
+      supportsRange: true
+    };
+
+    // Erro genérico no player (sem menção explícita de CORS, sem 404, sem decode error)
+    const evaluation = evaluateMediaSourceValidation({
+      source,
+      playbackState: 'error',
+      playbackErrorDetail: 'Fonte não suportada ou não pôde ser carregada (MEDIA_ERR_SRC_NOT_SUPPORTED - Código 4)',
+      browserErrorCode: 4
+    });
+
+    // Deve ser classificado como inconclusivo, NUNCA como falha comprovada por CORS
+    assert.notStrictEqual(evaluation.state, 'playback_failed', 'MP4 nativo não deve ter falha atribuída a ausência de CORS');
+    assert.strictEqual(evaluation.state, 'inconclusive');
+    assert.strictEqual(evaluation.stateLabel, '7. Resultado Inconclusivo');
+    assert.strictEqual(
+      evaluation.evidence.some(e => e.includes('Access-Control-Allow-Origin')),
+      false,
+      'Não deve incluir menção acusatória a Access-Control-Allow-Origin para MP4 nativo'
+    );
   });
 
   await t.test('13. Estado 6: Falha de Reprodução com Causa Evidente (playback_failed) - Arquivo 404', () => {

@@ -556,8 +556,14 @@ export function evaluateMediaSourceValidation(params: {
 
   // Se houver falha de reprodução no navegador ('error'):
   if (playbackState === 'error') {
-    // 6. Falha por CORS, formato ou outro motivo com evidências suficientes
-    const hasCorsEvidence = source?.corsSupported === false;
+    // A ausência de cabeçalho CORS é impeditiva para streams HLS (onde o motor hls.js faz requisições XHR/fetch de fragmentos)
+    // ou quando o player reporta explicitamente erro de rede/CORS. Para contêineres MP4/WebM nativos em <video>,
+    // a ausência de Access-Control-Allow-Origin não impede a reprodução nativa e não deve ser tratada isoladamente como falha de CORS.
+    const isHls = source?.format === 'HLS' || Boolean(source?.url && source.url.toLowerCase().includes('.m3u8'));
+    const hasExplicitCorsError = Boolean(
+      playbackErrorDetail && /cors|cross-origin/i.test(playbackErrorDetail)
+    );
+    const hasCorsEvidence = source?.corsSupported === false && (isHls || hasExplicitCorsError);
     const hasNotFoundEvidence = source?.statusCode === 404;
     const hasInvalidMimeEvidence = source?.mimeType && !source.mimeType.toLowerCase().includes('video');
     const hasDecodeErrorEvidence = browserErrorCode === 3; // MEDIA_ERR_DECODE

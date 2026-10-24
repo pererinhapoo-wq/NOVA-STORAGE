@@ -21,7 +21,10 @@ test('Bookmarklet Detector de Mídia para Navegadores Móveis (Brave Android)', 
   await t.test('3. Valida exclusivamente protocolos HTTP e HTTPS', () => {
     assert.ok(BOOKMARKLET_MINIFIED_CODE.includes('http://'));
     assert.ok(BOOKMARKLET_MINIFIED_CODE.includes('https://'));
-    assert.ok(BOOKMARKLET_MINIFIED_CODE.includes("protocol==='http:'||p.protocol==='https:'"));
+    assert.ok(
+      BOOKMARKLET_MINIFIED_CODE.includes("protocol === 'http:' || p.protocol === 'https:'") ||
+      BOOKMARKLET_MINIFIED_CODE.includes("protocol==='http:'||p.protocol==='https:'")
+    );
   });
 
   await t.test('4. Inspeciona tags de vídeo e a API de desempenho de recursos (Resource Timing)', () => {
@@ -54,6 +57,39 @@ test('Bookmarklet Detector de Mídia para Navegadores Móveis (Brave Android)', 
     assert.ok(BOOKMARKLET_MINIFIED_CODE.includes('window.location.href'));
     assert.ok(BOOKMARKLET_MINIFIED_CODE.includes('+ Origem'));
     assert.ok(BOOKMARKLET_MINIFIED_CODE.includes('ns-cpy-meta'));
+  });
+
+  await t.test('8. Identifica iframes e elementos de player via atributos src, data-src, data-lazy-src e data-player', () => {
+    assert.ok(BOOKMARKLET_MINIFIED_CODE.includes("querySelectorAll('iframe')"));
+    assert.ok(BOOKMARKLET_MINIFIED_CODE.includes("getAttribute('src')"));
+    assert.ok(BOOKMARKLET_MINIFIED_CODE.includes("getAttribute('data-src')"));
+    assert.ok(BOOKMARKLET_MINIFIED_CODE.includes("getAttribute('data-lazy-src')"));
+    assert.ok(BOOKMARKLET_MINIFIED_CODE.includes("getAttribute('data-player')"));
+    assert.ok(BOOKMARKLET_MINIFIED_CODE.includes('[data-player],[data-player-url],[data-iframe-src]'));
+  });
+
+  await t.test('9. Renderiza seção dedicada "Player Incorporado Detectado" e ação "Abrir Player em Nova Aba"', () => {
+    assert.ok(BOOKMARKLET_MINIFIED_CODE.includes('Player Incorporado Detectado'));
+    assert.ok(BOOKMARKLET_MINIFIED_CODE.includes('Abrir Player em Nova Aba'));
+    assert.ok(BOOKMARKLET_MINIFIED_CODE.includes('target="_blank"'));
+    assert.ok(BOOKMARKLET_MINIFIED_CODE.includes('rel="noopener noreferrer"'));
+    assert.ok(BOOKMARKLET_MINIFIED_CODE.includes('ns-ifr-list'));
+  });
+
+  await t.test('10. Mantém separação estrita: iframes não são promovidos a mídia direta sem extensão de vídeo', () => {
+    assert.ok(BOOKMARKLET_MINIFIED_CODE.includes('ifrMap'));
+    assert.ok(BOOKMARKLET_MINIFIED_CODE.includes('addIframePlayer'));
+    assert.ok(BOOKMARKLET_MINIFIED_CODE.includes('hasMediaExt'));
+    // A lista de streams diretos (ns-list) continua separada da lista de iframes (ns-ifr-list)
+    assert.ok(BOOKMARKLET_MINIFIED_CODE.includes('ns-list'));
+    assert.ok(BOOKMARKLET_MINIFIED_CODE.includes('ns-ifr-list'));
+  });
+
+  await t.test('11. Etapa 4 das instruções no Brave Android orienta sobre players incorporados e nova aba', () => {
+    const step4 = BRAVE_BOOKMARKLET_STEPS.find((s) => s.stepNumber === 4);
+    assert.ok(step4);
+    assert.ok(step4.detail.includes('players incorporados'));
+    assert.ok(step4.detail.includes('Abrir Player em Nova Aba'));
   });
 });
 

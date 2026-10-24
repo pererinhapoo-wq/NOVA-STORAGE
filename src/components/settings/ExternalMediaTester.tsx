@@ -371,9 +371,6 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
       }
     } else {
       // Vídeo direto MP4 / WebM
-      videoEl.src = mediaUrl;
-      videoEl.load();
-
       const handleLoadedMetadata = () => {
         updateDimensions();
       };
@@ -440,6 +437,17 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
       videoEl.addEventListener('waiting', handleWaiting);
       videoEl.addEventListener('resize', handleResize);
       videoEl.addEventListener('error', handleVideoErr);
+
+      videoEl.referrerPolicy = 'no-referrer';
+      videoEl.src = mediaUrl;
+      videoEl.load();
+
+      if (videoEl.readyState >= 1 && videoEl.videoWidth > 0 && videoEl.videoHeight > 0) {
+        updateDimensions();
+      }
+      if (videoEl.readyState >= 3) {
+        setPlaybackState('canplay');
+      }
 
       return () => {
         videoEl.removeEventListener('loadedmetadata', handleLoadedMetadata);
@@ -1268,6 +1276,8 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
                   ref={videoRef}
                   controls
                   playsInline
+                  preload="metadata"
+                  referrerPolicy="no-referrer"
                   onPlay={() => {
                     setPlaybackState('playing');
                     if (videoRef.current && videoRef.current.videoWidth > 0 && videoRef.current.videoHeight > 0) {
