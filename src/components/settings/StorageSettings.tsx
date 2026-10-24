@@ -123,14 +123,28 @@ export const StorageSettings: React.FC<StorageSettingsProps> = ({
         },
         credentials: 'include'
       });
-      if (res.ok) {
-        const data = await res.json();
+      const data = await res.json().catch(() => null);
+      if (data) {
         setPcloudStatus(data);
       }
     } catch {
       // Backend offline
     }
   }, []);
+
+  // URI de callback oficial do pCloud: prioriza resposta autoritativa do backend (PCLOUD_REDIRECT_URI)
+  const pcloudRedirectUri = React.useMemo(() => {
+    if (pcloudStatus?.oauth?.redirectUri) {
+      return pcloudStatus.oauth.redirectUri;
+    }
+    if (typeof window !== 'undefined' && window.location?.origin) {
+      const origin = window.location.origin;
+      if (!origin.includes('.run.app')) {
+        return `${origin}/api/storage/pcloud/callback`;
+      }
+    }
+    return 'https://nova-storage-bboehj89h-pererinhapoo-2486.vercel.app/api/storage/pcloud/callback';
+  }, [pcloudStatus?.oauth?.redirectUri]);
 
   React.useEffect(() => {
     fetch('/api/health')
@@ -1431,8 +1445,7 @@ export const StorageSettings: React.FC<StorageSettingsProps> = ({
               <button
                 type="button"
                 onClick={() => {
-                  const uri = pcloudStatus?.oauth?.redirectUri || window.location.origin + '/api/storage/pcloud/callback';
-                  navigator.clipboard.writeText(uri);
+                  navigator.clipboard.writeText(pcloudRedirectUri);
                   onNotify('URL Copiada', 'Cole em "Redirect URI" no aplicativo pCloud Developers.', 'success');
                 }}
                 className="inline-flex items-center gap-1 text-cyan-400 hover:text-cyan-300 text-[11px]"
@@ -1442,7 +1455,7 @@ export const StorageSettings: React.FC<StorageSettingsProps> = ({
               </button>
             </div>
             <p className="font-mono text-[11px] text-neutral-400 bg-neutral-900 p-2 rounded border border-neutral-800/80 break-all select-all">
-              {pcloudStatus?.oauth?.redirectUri || (window.location.origin + '/api/storage/pcloud/callback')}
+              {pcloudRedirectUri}
             </p>
             <p className="text-[11px] text-neutral-500">
               Cadastre esta URI exata na configuração do seu aplicativo pCloud (App Settings &gt; Redirect URIs).

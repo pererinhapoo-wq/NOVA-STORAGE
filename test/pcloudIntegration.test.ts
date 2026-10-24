@@ -1647,20 +1647,42 @@ test('Conexão OAuth 2.0 Oficial do pCloud na NOVA STORAGE', async (t) => {
     }
   });
 
-  await t.test('3.2 PCLOUD_REDIRECT_URI sem APP_URL na Vercel resolve origem confiável para postMessage e proteção CSRF', async () => {
-    delete process.env.APP_URL;
-    process.env.PCLOUD_REDIRECT_URI = 'https://nova-storage-prod.vercel.app/api/storage/pcloud/callback';
+  await t.test('3.2 PCLOUD_REDIRECT_URI tem prioridade autoritativa MESMO com APP_URL apontando para run.app', async () => {
+    // Simula cenário real da Vercel onde APP_URL foi herdada do ambiente dev
+    process.env.APP_URL = 'https://ais-dev-p24i4zinjjmgeb45edypcq-875945009084.us-east1.run.app';
+    process.env.PCLOUD_REDIRECT_URI = 'https://nova-storage-bboehj89h-pererinhapoo-2486.vercel.app/api/storage/pcloud/callback';
 
+    // 1. getRedirectUri deve retornar exatamente a PCLOUD_REDIRECT_URI
+    const redirectUri = PCloudService.getRedirectUri();
+    assert.strictEqual(redirectUri, 'https://nova-storage-bboehj89h-pererinhapoo-2486.vercel.app/api/storage/pcloud/callback');
+
+    // 2. getTrustedOrigin deve extrair a origem da PCLOUD_REDIRECT_URI, ignorando o run.app
     const origin = PCloudService.getTrustedOrigin();
-    assert.strictEqual(origin, 'https://nova-storage-prod.vercel.app');
+    assert.strictEqual(origin, 'https://nova-storage-bboehj89h-pererinhapoo-2486.vercel.app');
 
+    // 3. areOAuthCredentialsConfigured deve utilizar a PCLOUD_REDIRECT_URI
+    const creds = PCloudService.areOAuthCredentialsConfigured();
+    assert.strictEqual(creds.redirectUri, 'https://nova-storage-bboehj89h-pererinhapoo-2486.vercel.app/api/storage/pcloud/callback');
+    assert.strictEqual(creds.trustedOrigin, 'https://nova-storage-bboehj89h-pererinhapoo-2486.vercel.app');
+
+    // 4. generateOAuthUrl deve gerar authorize URL com redirect_uri oficial da Vercel
     const session = await DriveAuthService.createSession();
     session.role = 'admin';
     await DriveAuthService.saveSession(session);
 
+    const authUrlData = await PCloudService.generateOAuthUrl(session);
+    assert.strictEqual(authUrlData.redirectUri, 'https://nova-storage-bboehj89h-pererinhapoo-2486.vercel.app/api/storage/pcloud/callback');
+    assert.strictEqual(authUrlData.trustedOrigin, 'https://nova-storage-bboehj89h-pererinhapoo-2486.vercel.app');
+
+    const parsedAuth = new URL(authUrlData.authUrl);
+    assert.strictEqual(
+      parsedAuth.searchParams.get('redirect_uri'),
+      'https://nova-storage-bboehj89h-pererinhapoo-2486.vercel.app/api/storage/pcloud/callback'
+    );
+
     const { getTrustedOrigins } = await import('../src/server/routes/pcloud.ts');
     const trustedList = getTrustedOrigins();
-    assert.ok(trustedList.includes('https://nova-storage-prod.vercel.app'));
+    assert.ok(trustedList.includes('https://nova-storage-bboehj89h-pererinhapoo-2486.vercel.app'));
   });
 
   await t.test('3.3 POST /api/storage/pcloud/disconnect encerra a sessão OAuth e limpa os tokens da sessão', async () => {
@@ -1766,6 +1788,165 @@ test('Conexão OAuth 2.0 Oficial do pCloud na NOVA STORAGE', async (t) => {
     } finally {
       globalThis.fetch = originalFetch;
     }
+  });
+
+  await t.test('3.5 PCLOUD_REDIRECT_URI com aspas ou espaços acidentais é devidamente sanitizado', async () => {
+    process.env.APP_URL = 'https://ais-dev-p24i4zinjjmgeb45edypcq-875945009084.us-east1.run.app';
+    process.env.PCLOUD_REDIRECT_URI = ' "https://nova-storage-bboehj89h-pererinhapoo-2486.vercel.app/api/storage/pcloud/callback" ';
+
+    const redirectUri = PCloudService.getRedirectUri();
+    assert.strictEqual(redirectUri, 'https://nova-storage-bboehj89h-pererinhapoo-2486.vercel.app/api/storage/pcloud/callback');
+
+    const origin = PCloudService.getTrustedOrigin();
+    assert.strictEqual(origin, 'https://nova-storage-bboehj89h-pererinhapoo-2486.vercel.app');
+  });
+
+  await t.test('3.6 Bloqueio estrito de domínio run.app como fallback em produção ou Vercel', async () => {
+    delete process.env.PCLOUD_REDIRECT_URI;
+    process.env.VERCEL = '1';
+    process.env.APP_URL = 'https://ais-dev-p24i4zinjjmgeb45edypcq-875945009084.us-east1.run.app';
+    process.env.VERCEL_PROJECT_PRODUCTION_URL = 'nova-storage-bboehj89h-pererinhapoo-2486.vercel.app';
+
+    // Deve escolher o domínio de produção oficial da Vercel e rejeitar run.app
+    const originWithVercel = PCloudService.getTrustedOrigin();
+    assert.strictEqual(originWithVercel, 'https://nova-storage-bboehj89h-pererinhapoo-2486.vercel.app');
+    assert.strictEqual(
+      PCloudService.getRedirectUri(),
+      'https://nova-storage-bboehj89h-pererinhapoo-2486.vercel.app/api/storage/pcloud/callback'
+    );
+
+    // Se nenhuma URL da Vercel estiver definida, NUNCA usa run.app em produção/Vercel
+    delete process.env.VERCEL_PROJECT_PRODUCTION_URL;
+    delete process.env.VERCEL_URL;
+    const originFallback = PCloudService.getTrustedOrigin();
+    assert.strictEqual(originFallback.includes('run.app'), false);
+    assert.strictEqual(originFallback, 'http://localhost:3000');
+  });
+
+  await t.test('3.7 GET /api/storage/pcloud/status fornece oauth.redirectUri idêntica à PCLOUD_REDIRECT_URI para todos os níveis de autenticação', async () => {
+    process.env.APP_URL = 'https://ais-dev-p24i4zinjjmgeb45edypcq-875945009084.us-east1.run.app';
+    process.env.PCLOUD_REDIRECT_URI = 'https://nova-storage-bboehj89h-pererinhapoo-2486.vercel.app/api/storage/pcloud/callback';
+
+    // 1. Visitante anônimo (HTTP 401 AUTH_REQUIRED): ainda assim recebe oauth.redirectUri correta para exibir no cartão
+    await new Promise<void>((resolve) => {
+      let statusCode = 200;
+      const fakeReq: any = {
+        method: 'GET',
+        url: '/pcloud/status',
+        headers: { accept: 'application/json' },
+        signedCookies: {}
+      };
+      const fakeRes: any = {
+        status(code: number) {
+          statusCode = code;
+          return this;
+        },
+        json(data: any) {
+          assert.strictEqual(statusCode, 401);
+          assert.strictEqual(data?.code, 'AUTH_REQUIRED');
+          assert.strictEqual(
+            data?.oauth?.redirectUri,
+            'https://nova-storage-bboehj89h-pererinhapoo-2486.vercel.app/api/storage/pcloud/callback'
+          );
+          resolve();
+          return this;
+        }
+      };
+      pcloudRouter(fakeReq, fakeRes, () => resolve());
+    });
+
+    // 2. Usuário viewer / não-admin (HTTP 200): recebe oauth.redirectUri oficial
+    const viewerSession = await DriveAuthService.createSession();
+    viewerSession.role = 'viewer';
+    await DriveAuthService.saveSession(viewerSession);
+
+    await new Promise<void>((resolve) => {
+      let statusCode = 200;
+      const fakeReq: any = {
+        method: 'GET',
+        url: '/pcloud/status',
+        headers: {
+          'accept': 'application/json',
+          'x-nova-client': 'storage-v1'
+        },
+        signedCookies: { [DriveAuthService.COOKIE_NAME]: viewerSession.id }
+      };
+      const fakeRes: any = {
+        status(code: number) {
+          statusCode = code;
+          return this;
+        },
+        json(data: any) {
+          assert.strictEqual(statusCode, 200);
+          assert.strictEqual(
+            data?.oauth?.redirectUri,
+            'https://nova-storage-bboehj89h-pererinhapoo-2486.vercel.app/api/storage/pcloud/callback'
+          );
+          resolve();
+          return this;
+        }
+      };
+      pcloudRouter(fakeReq, fakeRes, () => resolve());
+    });
+
+    // 3. Usuário admin (HTTP 200): recebe oauth.redirectUri oficial
+    const adminSession = await DriveAuthService.createSession();
+    adminSession.role = 'admin';
+    await DriveAuthService.saveSession(adminSession);
+
+    await new Promise<void>((resolve) => {
+      let statusCode = 200;
+      const fakeReq: any = {
+        method: 'GET',
+        url: '/pcloud/status',
+        headers: {
+          'accept': 'application/json',
+          'x-nova-client': 'storage-v1'
+        },
+        signedCookies: { [DriveAuthService.COOKIE_NAME]: adminSession.id }
+      };
+      const fakeRes: any = {
+        status(code: number) {
+          statusCode = code;
+          return this;
+        },
+        json(data: any) {
+          assert.strictEqual(statusCode, 200);
+          assert.strictEqual(
+            data?.oauth?.redirectUri,
+            'https://nova-storage-bboehj89h-pererinhapoo-2486.vercel.app/api/storage/pcloud/callback'
+          );
+          resolve();
+          return this;
+        }
+      };
+      pcloudRouter(fakeReq, fakeRes, () => resolve());
+    });
+  });
+
+  await t.test('3.8 Paridade rigorosa: URI exibida no status, URI no generateOAuthUrl e URI do pCloud são idênticas', async () => {
+    process.env.APP_URL = 'https://ais-dev-p24i4zinjjmgeb45edypcq-875945009084.us-east1.run.app';
+    const EXPECTED_URI = 'https://nova-storage-bboehj89h-pererinhapoo-2486.vercel.app/api/storage/pcloud/callback';
+    process.env.PCLOUD_REDIRECT_URI = EXPECTED_URI;
+
+    const session = await DriveAuthService.createSession();
+    session.role = 'admin';
+    await DriveAuthService.saveSession(session);
+
+    // 1. URI no serviço
+    const serviceRedirect = PCloudService.getRedirectUri();
+    assert.strictEqual(serviceRedirect, EXPECTED_URI);
+
+    // 2. URI gerada para o fluxo OAuth
+    const authUrlData = await PCloudService.generateOAuthUrl(session);
+    assert.strictEqual(authUrlData.redirectUri, EXPECTED_URI);
+
+    const parsedAuth = new URL(authUrlData.authUrl);
+    assert.strictEqual(parsedAuth.searchParams.get('redirect_uri'), EXPECTED_URI);
+
+    // 3. URI exposta na configuração
+    const creds = PCloudService.areOAuthCredentialsConfigured();
+    assert.strictEqual(creds.redirectUri, EXPECTED_URI);
   });
 });
 

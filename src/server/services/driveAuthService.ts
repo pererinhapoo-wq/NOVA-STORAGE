@@ -150,11 +150,37 @@ export class DriveAuthService {
   /**
    * Resolves the explicitly configured, trusted application origin.
    * Does NOT rely on unverified Host headers.
+   * Rejects .run.app in production or on Vercel to prevent dev container URL leakage.
    */
   public static getTrustedOrigin(): string {
-    if (process.env.APP_URL?.trim()) {
-      return process.env.APP_URL.trim().replace(/\/$/, '');
+    const isProductionOrVercel = Boolean(
+      process.env.VERCEL || process.env.VERCEL_ENV || process.env.NODE_ENV === 'production'
+    );
+
+    // In production or on Vercel, check official Vercel production URLs first
+    const vercelUrl = process.env.VERCEL_PROJECT_PRODUCTION_URL || process.env.VERCEL_URL;
+    if (isProductionOrVercel && vercelUrl?.trim()) {
+      try {
+        const fullUrl = vercelUrl.trim().startsWith('http') ? vercelUrl.trim() : `https://${vercelUrl.trim()}`;
+        return new URL(fullUrl).origin;
+      } catch {
+        // ignore
+      }
     }
+
+    const appUrl = process.env.APP_URL?.trim();
+    if (appUrl) {
+      try {
+        const parsed = new URL(appUrl);
+        const isRunApp = parsed.hostname.endsWith('.run.app');
+        if (!isProductionOrVercel || !isRunApp) {
+          return parsed.origin;
+        }
+      } catch {
+        // ignore
+      }
+    }
+
     return 'http://localhost:3000';
   }
 

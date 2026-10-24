@@ -13,26 +13,7 @@ export const pcloudRouter = express.Router();
 export function getTrustedOrigins(): string[] {
   const trusted = new Set<string>();
 
-  // 1. Origem principal do servidor configurada via DriveAuthService / APP_URL
-  const appOrigin = DriveAuthService.getTrustedOrigin();
-  if (appOrigin) {
-    try {
-      trusted.add(new URL(appOrigin).origin.toLowerCase());
-    } catch {
-      // url inválida ignorada
-    }
-  }
-
-  const appUrl = process.env.APP_URL?.trim();
-  if (appUrl) {
-    try {
-      trusted.add(new URL(appUrl).origin.toLowerCase());
-    } catch {
-      // url inválida ignorada
-    }
-  }
-
-  // Origem resolvida pelo PCloudService (inclui PCLOUD_REDIRECT_URI)
+  // 1. Origem resolvida pelo PCloudService (prioridade absoluta para PCLOUD_REDIRECT_URI)
   const pcloudOrigin = PCloudService.getTrustedOrigin();
   if (pcloudOrigin) {
     try {
@@ -45,18 +26,42 @@ export function getTrustedOrigins(): string[] {
   const pcloudRedirect = process.env.PCLOUD_REDIRECT_URI?.trim();
   if (pcloudRedirect) {
     try {
-      trusted.add(new URL(pcloudRedirect).origin.toLowerCase());
+      const cleanRedirect = pcloudRedirect.replace(/^["']|["']$/g, '').trim();
+      trusted.add(new URL(cleanRedirect).origin.toLowerCase());
     } catch {
       // url inválida ignorada
     }
   }
 
-  // Origem automática de runtime na Vercel
+  // 2. Origem automática de runtime na Vercel
   const vercelUrl = process.env.VERCEL_PROJECT_PRODUCTION_URL || process.env.VERCEL_URL;
   if (vercelUrl?.trim()) {
     try {
       const fullUrl = vercelUrl.trim().startsWith('http') ? vercelUrl.trim() : `https://${vercelUrl.trim()}`;
       trusted.add(new URL(fullUrl).origin.toLowerCase());
+    } catch {
+      // url inválida ignorada
+    }
+  }
+
+  // 3. Origem principal do servidor configurada via DriveAuthService / APP_URL (com filtro de run.app em produção)
+  const appOrigin = DriveAuthService.getTrustedOrigin();
+  if (appOrigin) {
+    try {
+      trusted.add(new URL(appOrigin).origin.toLowerCase());
+    } catch {
+      // url inválida ignorada
+    }
+  }
+
+  const isProduction = process.env.NODE_ENV === 'production' || Boolean(process.env.VERCEL || process.env.VERCEL_ENV);
+  const appUrl = process.env.APP_URL?.trim();
+  if (appUrl) {
+    try {
+      const parsed = new URL(appUrl);
+      if (!isProduction || !parsed.hostname.endsWith('.run.app')) {
+        trusted.add(parsed.origin.toLowerCase());
+      }
     } catch {
       // url inválida ignorada
     }
@@ -77,8 +82,7 @@ export function getTrustedOrigins(): string[] {
     }
   }
 
-  // 3. Em ambientes de desenvolvimento ou teste, aceita origens locais padrão
-  const isProduction = process.env.NODE_ENV === 'production';
+  // 4. Em ambientes de desenvolvimento ou teste, aceita origens locais padrão
   if (!isProduction) {
     trusted.add('http://localhost:3000');
     trusted.add('http://localhost:5173');
@@ -153,6 +157,7 @@ export function verifyCsrfForSession(req: Request): { valid: boolean; code?: str
  */
 pcloudRouter.get('/pcloud/status', async (req: Request, res: Response) => {
   const auth = await authenticatePCloudRequest(req);
+  const oauthConfig = PCloudService.areOAuthCredentialsConfigured();
 
   if (!auth.authenticated) {
     return res.status(401).json({
@@ -161,13 +166,19 @@ pcloudRouter.get('/pcloud/status', async (req: Request, res: Response) => {
       status: 'unauthorized',
       code: 'AUTH_REQUIRED',
       message: 'Autenticação obrigatória para consultar o status do armazenamento pCloud.',
-      checkedAt: new Date().toISOString()
+      checkedAt: new Date().toISOString(),
+      oauth: {
+        configured: oauthConfig.configured,
+        clientIdConfigured: oauthConfig.clientIdConfigured,
+        clientSecretConfigured: oauthConfig.clientSecretConfigured,
+        redirectUri: oauthConfig.redirectUri,
+        connected: false
+      }
     });
   }
 
   try {
     const status = await PCloudService.testConnection(undefined, auth.session);
-    const oauthConfig = PCloudService.areOAuthCredentialsConfigured();
 
     // Se o usuário não for administrador, omite detalhes de conta interna (cota, e-mail)
     if (auth.role !== 'admin') {
@@ -177,7 +188,14 @@ pcloudRouter.get('/pcloud/status', async (req: Request, res: Response) => {
         status: status.status,
         code: status.code,
         message: status.message,
-        checkedAt: status.checkedAt
+        checkedAt: status.checkedAt,
+        oauth: {
+          configured: oauthConfig.configured,
+          clientIdConfigured: oauthConfig.clientIdConfigured,
+          clientSecretConfigured: oauthConfig.clientSecretConfigured,
+          redirectUri: oauthConfig.redirectUri,
+          connected: Boolean(auth.session?.pcloudTokens?.accessToken)
+        }
       });
     }
 

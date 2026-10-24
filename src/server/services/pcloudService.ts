@@ -266,32 +266,48 @@ export class PCloudService {
 
   /**
    * Resolve a origem confiável do aplicativo para pCloud.
-   * Suporta APP_URL, PCLOUD_REDIRECT_URI e variáveis de runtime da Vercel.
+   * Regras de Precedência Estrita:
+   * 1. PCLOUD_REDIRECT_URI é a fonte prioritária e autoritativa absoluta quando definida.
+   * 2. Em ambiente Vercel/Produção, prioriza domínios oficiais da Vercel (VERCEL_PROJECT_PRODUCTION_URL ou VERCEL_URL).
+   * 3. APP_URL configurada (rejeita run.app quando em produção ou na Vercel).
+   * 4. Fallback seguro via DriveAuthService (com mesmo filtro de .run.app).
    */
   public static getTrustedOrigin(): string {
-    const appUrl = process.env.APP_URL?.trim();
-    if (appUrl) {
+    // 1. PCLOUD_REDIRECT_URI é a fonte prioritária e autoritativa absoluta quando definida
+    const rawRedirect = process.env.PCLOUD_REDIRECT_URI?.trim();
+    const cleanRedirect = rawRedirect ? rawRedirect.replace(/^["']|["']$/g, '').trim() : '';
+    if (cleanRedirect) {
       try {
-        return new URL(appUrl).origin;
+        return new URL(cleanRedirect).origin;
       } catch {
-        // ignore
+        // url inválida ignorada
       }
     }
 
-    const redirectUri = process.env.PCLOUD_REDIRECT_URI?.trim();
-    if (redirectUri) {
-      try {
-        return new URL(redirectUri).origin;
-      } catch {
-        // ignore
-      }
-    }
+    const isProductionOrVercel = Boolean(
+      process.env.VERCEL || process.env.VERCEL_ENV || process.env.NODE_ENV === 'production'
+    );
 
+    // 2. Domínios oficiais de produção na Vercel
     const vercelUrl = process.env.VERCEL_PROJECT_PRODUCTION_URL || process.env.VERCEL_URL;
     if (vercelUrl?.trim()) {
       try {
         const fullUrl = vercelUrl.trim().startsWith('http') ? vercelUrl.trim() : `https://${vercelUrl.trim()}`;
         return new URL(fullUrl).origin;
+      } catch {
+        // ignore
+      }
+    }
+
+    // 3. APP_URL configurada (rejeita run.app quando em produção ou na Vercel)
+    const appUrl = process.env.APP_URL?.trim();
+    if (appUrl) {
+      try {
+        const parsed = new URL(appUrl);
+        const isRunApp = parsed.hostname.endsWith('.run.app');
+        if (!isProductionOrVercel || !isRunApp) {
+          return parsed.origin;
+        }
       } catch {
         // ignore
       }
@@ -325,11 +341,17 @@ export class PCloudService {
   }
 
   /**
-   * Retorna a URI exata de redirecionamento OAuth cadastrada no console do pCloud
+   * Retorna a URI exata de redirecionamento OAuth cadastrada no console do pCloud.
+   * Regras de Precedência Estrita:
+   * 1. PCLOUD_REDIRECT_URI é a fonte prioritária e autoritativa absoluta.
+   * 2. Remove eventuais aspas e espaços acidentais de configuração de variáveis de ambiente.
+   * 3. Quando ausente, deriva da origem confiável resolvida (sem fallback para run.app em produção).
    */
   public static getRedirectUri(): string {
-    if (process.env.PCLOUD_REDIRECT_URI?.trim()) {
-      return process.env.PCLOUD_REDIRECT_URI.trim();
+    const raw = process.env.PCLOUD_REDIRECT_URI?.trim();
+    const clean = raw ? raw.replace(/^["']|["']$/g, '').trim() : '';
+    if (clean) {
+      return clean;
     }
     const origin = this.getTrustedOrigin();
     return `${origin}/api/storage/pcloud/callback`;
