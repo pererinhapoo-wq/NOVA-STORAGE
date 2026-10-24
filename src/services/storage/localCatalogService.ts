@@ -296,6 +296,18 @@ const INITIAL_PROVIDERS: StorageProviderConfig[] = [
     lastCheckTimestamp: null
   },
   {
+    id: 'pcloud',
+    name: 'pCloud Storage API',
+    status: 'not_configured',
+    statusMessage: 'Conexão com armazenamento real pCloud ainda não configurada.',
+    authMethod: 'oauth2',
+    endpointDoc: 'https://docs.pcloud.com/',
+    settings: {
+      targetFolderId: ''
+    },
+    lastCheckTimestamp: null
+  },
+  {
     id: 'mega',
     name: 'MEGA Cloud Storage',
     status: 'not_configured',
@@ -379,7 +391,15 @@ export class LocalCatalogService {
     try {
       const stored = localStorage.getItem(STORAGE_KEYS.PROVIDERS);
       if (stored) {
-        return JSON.parse(stored);
+        const parsed = JSON.parse(stored);
+        if (Array.isArray(parsed)) {
+          for (const initial of INITIAL_PROVIDERS) {
+            if (!parsed.some(p => p.id === initial.id)) {
+              parsed.push(initial);
+            }
+          }
+          return parsed;
+        }
       }
     } catch {
       // Fallback

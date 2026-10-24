@@ -1646,5 +1646,126 @@ test('Conexão OAuth 2.0 Oficial do pCloud na NOVA STORAGE', async (t) => {
       globalThis.fetch = originalFetch;
     }
   });
+
+  await t.test('3.2 PCLOUD_REDIRECT_URI sem APP_URL na Vercel resolve origem confiável para postMessage e proteção CSRF', async () => {
+    delete process.env.APP_URL;
+    process.env.PCLOUD_REDIRECT_URI = 'https://nova-storage-prod.vercel.app/api/storage/pcloud/callback';
+
+    const origin = PCloudService.getTrustedOrigin();
+    assert.strictEqual(origin, 'https://nova-storage-prod.vercel.app');
+
+    const session = await DriveAuthService.createSession();
+    session.role = 'admin';
+    await DriveAuthService.saveSession(session);
+
+    const { getTrustedOrigins } = await import('../src/server/routes/pcloud.ts');
+    const trustedList = getTrustedOrigins();
+    assert.ok(trustedList.includes('https://nova-storage-prod.vercel.app'));
+  });
+
+  await t.test('3.3 POST /api/storage/pcloud/disconnect encerra a sessão OAuth e limpa os tokens da sessão', async () => {
+    const session = await DriveAuthService.createSession();
+    session.role = 'admin';
+    session.pcloudTokens = {
+      accessToken: 'valid_token_to_disconnect',
+      tokenType: 'bearer',
+      userId: 12345
+    };
+    await DriveAuthService.saveSession(session);
+
+    await new Promise<void>((resolve) => {
+      let statusCode = 200;
+      const fakeReq: any = {
+        method: 'POST',
+        url: '/pcloud/disconnect',
+        headers: {
+          'content-type': 'application/json',
+          'x-nova-client': 'storage-v1',
+          'origin': TRUSTED_ORIGIN
+        },
+        body: {},
+        signedCookies: { [DriveAuthService.COOKIE_NAME]: session.id }
+      };
+      const fakeRes: any = {
+        status(code: number) {
+          statusCode = code;
+          return this;
+        },
+        async json(data: any) {
+          assert.strictEqual(statusCode, 200);
+          assert.strictEqual(data?.success, true);
+
+          const reloaded = await DriveAuthService.getValidSession(session.id);
+          assert.strictEqual(reloaded?.pcloudTokens, null);
+          resolve();
+          return this;
+        }
+      };
+      pcloudRouter(fakeReq, fakeRes, () => resolve());
+    });
+  });
+
+  await t.test('3.4 Callback OAuth processa hints de locationid e hostname retornados na query da URL', async () => {
+    const session = await DriveAuthService.createSession();
+    const VALID_STATE = 'hints_state_1234567890abcdef1234567890abcdef1234567890abcdef1234';
+    session.pcloudCsrfState = VALID_STATE;
+    session.pcloudCsrfExpiresAt = Date.now() + 600000;
+    await DriveAuthService.saveSession(session);
+
+    const originalFetch = globalThis.fetch;
+    let endpointHit = '';
+
+    globalThis.fetch = async (input: any) => {
+      endpointHit = String(input);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          result: 0,
+          access_token: 'tok_hint_eu',
+          locationid: 2,
+          hostname: 'eapi.pcloud.com'
+        })
+      } as any;
+    };
+
+    try {
+      await new Promise<void>((resolve) => {
+        let statusCode = 200;
+        const fakeReq: any = {
+          method: 'GET',
+          url: `/pcloud/callback?code=hint_code&state=${VALID_STATE}&locationid=2&hostname=eapi.pcloud.com`,
+          query: {
+            code: 'hint_code',
+            state: VALID_STATE,
+            locationid: '2',
+            hostname: 'eapi.pcloud.com'
+          },
+          headers: {},
+          signedCookies: { [DriveAuthService.COOKIE_NAME]: session.id }
+        };
+        const fakeRes: any = {
+          status(code: number) {
+            statusCode = code;
+            return this;
+          },
+          async send(html: string) {
+            assert.strictEqual(statusCode, 200);
+            assert.ok(endpointHit.includes('eapi.pcloud.com/oauth2_token'));
+            assert.ok(html.includes('eapi.pcloud.com'));
+
+            const reloaded = await DriveAuthService.getValidSession(session.id);
+            assert.strictEqual(reloaded?.pcloudTokens?.hostname, 'eapi.pcloud.com');
+            assert.strictEqual(reloaded?.pcloudTokens?.locationId, 2);
+            resolve();
+            return this;
+          }
+        };
+        pcloudRouter(fakeReq, fakeRes, () => resolve());
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });
 

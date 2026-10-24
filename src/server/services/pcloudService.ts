@@ -265,6 +265,42 @@ export class PCloudService {
   }
 
   /**
+   * Resolve a origem confiável do aplicativo para pCloud.
+   * Suporta APP_URL, PCLOUD_REDIRECT_URI e variáveis de runtime da Vercel.
+   */
+  public static getTrustedOrigin(): string {
+    const appUrl = process.env.APP_URL?.trim();
+    if (appUrl) {
+      try {
+        return new URL(appUrl).origin;
+      } catch {
+        // ignore
+      }
+    }
+
+    const redirectUri = process.env.PCLOUD_REDIRECT_URI?.trim();
+    if (redirectUri) {
+      try {
+        return new URL(redirectUri).origin;
+      } catch {
+        // ignore
+      }
+    }
+
+    const vercelUrl = process.env.VERCEL_PROJECT_PRODUCTION_URL || process.env.VERCEL_URL;
+    if (vercelUrl?.trim()) {
+      try {
+        const fullUrl = vercelUrl.trim().startsWith('http') ? vercelUrl.trim() : `https://${vercelUrl.trim()}`;
+        return new URL(fullUrl).origin;
+      } catch {
+        // ignore
+      }
+    }
+
+    return DriveAuthService.getTrustedOrigin();
+  }
+
+  /**
    * Verifica se as credenciais OAuth do pCloud estão configuradas no servidor
    */
   public static areOAuthCredentialsConfigured(): {
@@ -277,7 +313,7 @@ export class PCloudService {
     const clientId = process.env.PCLOUD_CLIENT_ID?.trim();
     const clientSecret = process.env.PCLOUD_CLIENT_SECRET?.trim();
     const redirectUri = this.getRedirectUri();
-    const trustedOrigin = DriveAuthService.getTrustedOrigin();
+    const trustedOrigin = this.getTrustedOrigin();
 
     return {
       configured: Boolean(clientId && clientSecret),
@@ -295,12 +331,14 @@ export class PCloudService {
     if (process.env.PCLOUD_REDIRECT_URI?.trim()) {
       return process.env.PCLOUD_REDIRECT_URI.trim();
     }
-    const origin = DriveAuthService.getTrustedOrigin();
+    const origin = this.getTrustedOrigin();
     return `${origin}/api/storage/pcloud/callback`;
   }
 
   /**
-   * Gera a URL de autorização OAuth 2.0 do pCloud com state protegido contra CSRF
+   * Gera a URL de autorização OAuth 2.0 do pCloud com state protegido contra CSRF.
+   * O fluxo interativo de login e consentimento da pCloud ocorre sempre em https://my.pcloud.com/oauth2/authorize
+   * tanto para contas nos EUA quanto na Europa.
    */
   public static async generateOAuthUrl(
     session: UserSessionData
@@ -323,8 +361,11 @@ export class PCloudService {
 
     await DriveAuthService.saveSession(session);
 
-    const region = process.env.PCLOUD_REGION?.trim().toLowerCase();
-    const authHost = (region === 'eu' || region === 'europe') ? this.EU_OAUTH_AUTH_HOST : this.DEFAULT_OAUTH_AUTH_HOST;
+    // Endpoint oficial web de autorização: my.pcloud.com
+    const customAuthHost = process.env.PCLOUD_OAUTH_AUTH_HOST?.trim();
+    const authHost = customAuthHost && this.isValidPCloudHost(customAuthHost)
+      ? customAuthHost
+      : this.DEFAULT_OAUTH_AUTH_HOST;
 
     const params = new URLSearchParams({
       client_id: clientId,
@@ -339,7 +380,7 @@ export class PCloudService {
       authUrl,
       state: csrfState,
       redirectUri,
-      trustedOrigin: DriveAuthService.getTrustedOrigin()
+      trustedOrigin: this.getTrustedOrigin()
     };
   }
 
@@ -348,7 +389,11 @@ export class PCloudService {
    */
   public static async exchangeCodeForToken(
     code: string,
-    session?: UserSessionData
+    session?: UserSessionData,
+    hints?: {
+      locationId?: number;
+      hostname?: string;
+    }
   ): Promise<{
     success: boolean;
     accessToken?: string;
@@ -376,7 +421,11 @@ export class PCloudService {
     }
 
     let tokenHost = this.DEFAULT_API_HOST;
-    if (session?.pcloudTokens?.hostname && this.isValidPCloudHost(session.pcloudTokens.hostname)) {
+    if (hints?.hostname && this.isValidPCloudHost(hints.hostname)) {
+      tokenHost = hints.hostname;
+    } else if (hints?.locationId === 2) {
+      tokenHost = this.EU_API_HOST;
+    } else if (session?.pcloudTokens?.hostname && this.isValidPCloudHost(session.pcloudTokens.hostname)) {
       tokenHost = session.pcloudTokens.hostname;
     } else {
       const region = process.env.PCLOUD_REGION?.trim().toLowerCase();
@@ -454,7 +503,11 @@ export class PCloudService {
   public static async handleOAuthCallback(
     session: UserSessionData,
     code: string,
-    state: string
+    state: string,
+    hints?: {
+      locationId?: number;
+      hostname?: string;
+    }
   ): Promise<{
     success: boolean;
     userId?: number;
@@ -490,7 +543,7 @@ export class PCloudService {
     session.pcloudCsrfExpiresAt = null;
 
     // 3. Troca do código de autorização pelo token de acesso
-    const exchangeResult = await this.exchangeCodeForToken(code, session);
+    const exchangeResult = await this.exchangeCodeForToken(code, session, hints);
     if (!exchangeResult.success || !exchangeResult.accessToken) {
       await DriveAuthService.saveSession(session).catch(() => {});
       return {

@@ -248,6 +248,26 @@ export class PCloudStorageAdapter implements StorageProviderAdapter {
   }
 
   /**
+   * Encerra a conexão OAuth do pCloud na sessão do servidor
+   */
+  async disconnect(): Promise<boolean> {
+    try {
+      const res = await fetch('/api/storage/pcloud/disconnect', {
+        method: 'POST',
+        headers: this.getRequestHeaders('application/json'),
+        credentials: 'include'
+      });
+      if (res.ok) {
+        this.lastKnownStatus = 'not_configured';
+        return true;
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * Listagem de pasta remota: mantida vazia
    */
   async listFolderContents(_folderRemoteId?: string): Promise<RemoteFileMetadata[]> {

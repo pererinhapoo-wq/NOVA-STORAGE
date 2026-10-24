@@ -32,6 +32,36 @@ export function getTrustedOrigins(): string[] {
     }
   }
 
+  // Origem resolvida pelo PCloudService (inclui PCLOUD_REDIRECT_URI)
+  const pcloudOrigin = PCloudService.getTrustedOrigin();
+  if (pcloudOrigin) {
+    try {
+      trusted.add(new URL(pcloudOrigin).origin.toLowerCase());
+    } catch {
+      // url inválida ignorada
+    }
+  }
+
+  const pcloudRedirect = process.env.PCLOUD_REDIRECT_URI?.trim();
+  if (pcloudRedirect) {
+    try {
+      trusted.add(new URL(pcloudRedirect).origin.toLowerCase());
+    } catch {
+      // url inválida ignorada
+    }
+  }
+
+  // Origem automática de runtime na Vercel
+  const vercelUrl = process.env.VERCEL_PROJECT_PRODUCTION_URL || process.env.VERCEL_URL;
+  if (vercelUrl?.trim()) {
+    try {
+      const fullUrl = vercelUrl.trim().startsWith('http') ? vercelUrl.trim() : `https://${vercelUrl.trim()}`;
+      trusted.add(new URL(fullUrl).origin.toLowerCase());
+    } catch {
+      // url inválida ignorada
+    }
+  }
+
   // 2. Lista adicional explícita em TRUSTED_ORIGINS (separada por vírgula)
   const envList = process.env.TRUSTED_ORIGINS?.trim();
   if (envList) {
@@ -252,7 +282,7 @@ pcloudRouter.get(['/pcloud/callback', '/pcloud/callback/'], async (req: Request,
   const code = req.query.code as string | undefined;
   const state = req.query.state as string | undefined;
   const oauthError = req.query.error as string | undefined;
-  const trustedOrigin = DriveAuthService.getTrustedOrigin();
+  const trustedOrigin = PCloudService.getTrustedOrigin();
 
   // 1. Trata erro de autorização retornado diretamente pelo pCloud (ex: usuário recusou)
   if (oauthError) {
@@ -332,7 +362,11 @@ pcloudRouter.get(['/pcloud/callback', '/pcloud/callback/'], async (req: Request,
   }
 
   // 4. Validação do state e troca do código pelo token no backend
-  const result = await PCloudService.handleOAuthCallback(session, code, state);
+  const locationIdParam = req.query.locationid ? Number(req.query.locationid) : undefined;
+  const hostnameParam = typeof req.query.hostname === 'string' ? req.query.hostname.trim() : undefined;
+  const hints = (locationIdParam || hostnameParam) ? { locationId: locationIdParam, hostname: hostnameParam } : undefined;
+
+  const result = await PCloudService.handleOAuthCallback(session, code, state, hints);
 
   if (!result.success) {
     const sanitizedError = String(result.error || 'Erro desconhecido na troca de credenciais.').replace(/[<>&"']/g, '');
@@ -396,6 +430,57 @@ pcloudRouter.get(['/pcloud/callback', '/pcloud/callback/'], async (req: Request,
       </body>
     </html>
   `);
+});
+
+/**
+ * POST /api/storage/pcloud/disconnect
+ * Encerra a conexão OAuth do pCloud na sessão do usuário
+ */
+pcloudRouter.post('/pcloud/disconnect', async (req: Request, res: Response) => {
+  const auth = await authenticatePCloudRequest(req);
+
+  if (!auth.authenticated) {
+    return res.status(401).json({
+      success: false,
+      code: 'AUTH_REQUIRED',
+      message: 'Autenticação necessária para desconectar a conta pCloud.'
+    });
+  }
+
+  if (auth.authMethod === 'session') {
+    const csrfCheck = verifyCsrfForSession(req);
+    if (!csrfCheck.valid) {
+      return res.status(403).json({
+        success: false,
+        code: csrfCheck.code,
+        message: csrfCheck.message
+      });
+    }
+  }
+
+  if (auth.role !== 'admin') {
+    return res.status(403).json({
+      success: false,
+      code: 'FORBIDDEN',
+      message: 'Apenas administradores autorizados podem desconectar o armazenamento pCloud.'
+    });
+  }
+
+  try {
+    if (auth.session) {
+      await PCloudService.disconnectOAuth(auth.session);
+    }
+    return res.status(200).json({
+      success: true,
+      message: 'Sessão do pCloud desconectada com sucesso no servidor.'
+    });
+  } catch (error: any) {
+    return res.status(500).json({
+      success: false,
+      code: 'API_ERROR',
+      message: error.message || 'Erro ao desconectar pCloud.'
+    });
+  }
 });
 
 /**

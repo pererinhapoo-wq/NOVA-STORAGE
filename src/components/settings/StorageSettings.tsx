@@ -29,6 +29,7 @@ import {
 import { StorageProviderConfig } from '../../types/storage';
 import { GoogleDriveStorageAdapter, DriveVideoItem } from '../../services/storage/providers/googleDriveAdapter';
 import { MegaStorageAdapter } from '../../services/storage/providers/megaAdapter';
+import { PCloudStorageAdapter } from '../../services/storage/providers/pcloudAdapter';
 import { DriveVideoPlayerModal } from './DriveVideoPlayerModal';
 import { MuxVideoTester } from './MuxVideoTester';
 import { ExternalMediaTester } from './ExternalMediaTester';
@@ -65,6 +66,28 @@ export const StorageSettings: React.FC<StorageSettingsProps> = ({
     redirectUri: string;
   } | null>(null);
 
+  const [pcloudStatus, setPcloudStatus] = useState<{
+    configured: boolean;
+    connected: boolean;
+    status: string;
+    code?: string;
+    message: string;
+    details?: {
+      email?: string;
+      quotaFormatted?: string;
+      usedQuotaFormatted?: string;
+      apiHost?: string;
+      premium?: boolean;
+    };
+    oauth?: {
+      configured: boolean;
+      clientIdConfigured: boolean;
+      clientSecretConfigured: boolean;
+      redirectUri: string;
+      connected: boolean;
+    };
+  } | null>(null);
+
   // Google Drive Video Explorer State
   const [isExploringDrive, setIsExploringDrive] = useState(false);
   const [driveVideos, setDriveVideos] = useState<DriveVideoItem[]>([]);
@@ -85,6 +108,24 @@ export const StorageSettings: React.FC<StorageSettingsProps> = ({
       if (res.ok) {
         const data = await res.json();
         setDriveStatus(data);
+      }
+    } catch {
+      // Backend offline
+    }
+  }, []);
+
+  const fetchPcloudStatus = React.useCallback(async () => {
+    try {
+      const res = await fetch('/api/storage/pcloud/status', {
+        headers: {
+          'Accept': 'application/json',
+          'X-Nova-Client': 'storage-v1'
+        },
+        credentials: 'include'
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setPcloudStatus(data);
       }
     } catch {
       // Backend offline
@@ -114,6 +155,7 @@ export const StorageSettings: React.FC<StorageSettingsProps> = ({
       });
 
     fetchDriveStatus();
+    fetchPcloudStatus();
 
     // Listen for OAuth popup completion with strict origin and source window verification
     const handleMessage = async (event: MessageEvent) => {
@@ -149,12 +191,20 @@ export const StorageSettings: React.FC<StorageSettingsProps> = ({
         popupWindowRef.current = null;
         onNotify('Falha na Autorização OAuth', event.data.error || 'Ocorreu um erro ao autorizar.', 'error');
         fetchDriveStatus();
+      } else if (event.data?.type === 'PCLOUD_OAUTH_COMPLETED') {
+        popupWindowRef.current = null;
+        fetchPcloudStatus();
+        onNotify('pCloud Conectado!', 'Autorização OAuth 2.0 concluída com sucesso com o pCloud.', 'success');
+      } else if (event.data?.type === 'PCLOUD_OAUTH_ERROR') {
+        popupWindowRef.current = null;
+        onNotify('Falha na Autorização pCloud', event.data.error || 'Ocorreu um erro ao autorizar com o pCloud.', 'error');
+        fetchPcloudStatus();
       }
     };
 
     window.addEventListener('message', handleMessage);
     return () => window.removeEventListener('message', handleMessage);
-  }, [fetchDriveStatus, onNotify]);
+  }, [fetchDriveStatus, fetchPcloudStatus, onNotify]);
 
   const popupWindowRef = React.useRef<Window | null>(null);
 
@@ -192,6 +242,41 @@ export const StorageSettings: React.FC<StorageSettingsProps> = ({
     }
   };
 
+  const handleConnectPCloud = async () => {
+    try {
+      const adapter = new PCloudStorageAdapter();
+      const authData = await adapter.getOAuthUrl();
+      if (!authData || !authData.url) {
+        onNotify('Falha na Autorização', 'Não foi possível gerar o link de autorização com o pCloud.', 'error');
+        return;
+      }
+
+      const popup = window.open(authData.url, 'pcloud_oauth_popup', 'width=600,height=700');
+      popupWindowRef.current = popup;
+
+      if (!popup) {
+        onNotify('Popup Bloqueado', 'Permita popups no navegador para autenticar com o pCloud.', 'error');
+      }
+    } catch (err: any) {
+      onNotify('Erro ao Iniciar OAuth', err?.message || 'Falha ao contatar o servidor para autorizar pCloud.', 'error');
+    }
+  };
+
+  const handleDisconnectPCloud = async () => {
+    try {
+      const adapter = new PCloudStorageAdapter();
+      const ok = await adapter.disconnect();
+      if (ok) {
+        onNotify('Desconectado', 'Sessão do pCloud encerrada no servidor.', 'info');
+        fetchPcloudStatus();
+      } else {
+        onNotify('Erro ao Desconectar', 'Não foi possível encerrar a sessão pCloud.', 'error');
+      }
+    } catch {
+      onNotify('Erro de Conexão', 'Não foi possível contatar o servidor.', 'error');
+    }
+  };
+
   const handleTestConnection = async (provider: StorageProviderConfig) => {
     setTestingId(provider.id);
     try {
@@ -214,6 +299,22 @@ export const StorageSettings: React.FC<StorageSettingsProps> = ({
           result.success ? 'success' : 'info'
         );
         fetchDriveStatus();
+      } else if (provider.id === 'pcloud') {
+        const adapter = new PCloudStorageAdapter();
+        const result = await adapter.testConnection(provider.settings as Record<string, string>);
+        setTestResults(prev => ({
+          ...prev,
+          [provider.id]: {
+            success: result.success,
+            message: result.message
+          }
+        }));
+        onNotify(
+          result.success ? 'Conexão validada' : 'Resultado do Teste',
+          result.message,
+          result.success ? 'success' : 'info'
+        );
+        fetchPcloudStatus();
       } else if (provider.id === 'mega') {
         const adapter = new MegaStorageAdapter(
           provider.settings.megaEmail,
@@ -1262,7 +1363,152 @@ export const StorageSettings: React.FC<StorageSettingsProps> = ({
           )}
         </div>
 
-        {/* 2. MEGA Card */}
+        {/* 2. pCloud Card */}
+        <div className="p-4 sm:p-6 rounded-xl bg-neutral-900/70 border border-neutral-800/80 space-y-5">
+          <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-lg bg-neutral-950 border border-neutral-800 flex items-center justify-center text-cyan-400 shrink-0 mt-0.5">
+                <Cloud className="w-5 h-5" />
+              </div>
+              <div className="space-y-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h3 className="text-sm font-bold text-white">pCloud Storage API (OAuth 2.0)</h3>
+                  {pcloudStatus?.connected ? (
+                    <span className="text-[11px] font-mono text-emerald-400 bg-emerald-950/40 px-2 py-0.5 rounded border border-emerald-800/50 flex items-center gap-1">
+                      <CheckCircle2 className="w-3 h-3" />
+                      CONECTADO
+                    </span>
+                  ) : pcloudStatus?.oauth?.configured ? (
+                    <span className="text-[11px] font-mono text-cyan-400 bg-cyan-950/40 px-2 py-0.5 rounded border border-cyan-800/50">
+                      AGUARDANDO AUTORIZAÇÃO
+                    </span>
+                  ) : (
+                    <span className="text-[11px] font-mono text-amber-400 bg-amber-950/40 px-2 py-0.5 rounded border border-amber-800/50">
+                      NÃO CONFIGURADO
+                    </span>
+                  )}
+                </div>
+                <p className="text-xs text-neutral-400">
+                  Autenticação server-side oficial · Suporte nativo a HTTP Range (206) para streaming fluido
+                </p>
+                {pcloudStatus?.connected && pcloudStatus.details?.email && (
+                  <div className="text-xs text-emerald-300 font-medium pt-1 flex flex-wrap items-center gap-2">
+                    <span>Conta: <strong className="font-mono text-white">{pcloudStatus.details.email}</strong></span>
+                    {pcloudStatus.details.usedQuotaFormatted && pcloudStatus.details.quotaFormatted && (
+                      <span className="text-neutral-400">
+                        · Espaço: <span className="font-mono text-neutral-200">{pcloudStatus.details.usedQuotaFormatted} / {pcloudStatus.details.quotaFormatted}</span>
+                      </span>
+                    )}
+                    {pcloudStatus.details.apiHost && (
+                      <span className="text-cyan-400 font-mono text-[11px] bg-cyan-950/50 px-1.5 py-0.5 rounded border border-cyan-800/40">
+                        {pcloudStatus.details.apiHost}
+                      </span>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="flex items-center gap-3 self-start sm:self-auto">
+              <a
+                href="https://docs.pcloud.com/"
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1.5 text-xs text-neutral-400 hover:text-cyan-400 transition-colors"
+              >
+                <span>Documentação pCloud</span>
+                <ExternalLink className="w-3.5 h-3.5" />
+              </a>
+            </div>
+          </div>
+
+          {/* Redirect URI configuration banner */}
+          <div className="p-3.5 rounded-lg bg-neutral-950/90 border border-neutral-800 text-xs space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="font-semibold text-neutral-300">
+                URI de Redirecionamento OAuth (pCloud Console):
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  const uri = pcloudStatus?.oauth?.redirectUri || window.location.origin + '/api/storage/pcloud/callback';
+                  navigator.clipboard.writeText(uri);
+                  onNotify('URL Copiada', 'Cole em "Redirect URI" no aplicativo pCloud Developers.', 'success');
+                }}
+                className="inline-flex items-center gap-1 text-cyan-400 hover:text-cyan-300 text-[11px]"
+              >
+                <KeyRound className="w-3.5 h-3.5" />
+                <span>Copiar URL</span>
+              </button>
+            </div>
+            <p className="font-mono text-[11px] text-neutral-400 bg-neutral-900 p-2 rounded border border-neutral-800/80 break-all select-all">
+              {pcloudStatus?.oauth?.redirectUri || (window.location.origin + '/api/storage/pcloud/callback')}
+            </p>
+            <p className="text-[11px] text-neutral-500">
+              Cadastre esta URI exata na configuração do seu aplicativo pCloud (App Settings &gt; Redirect URIs).
+            </p>
+          </div>
+
+          {/* Actions & Result */}
+          <div className="pt-2 flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-t border-neutral-800/60">
+            <div className="text-xs text-neutral-400">
+              {testResults['pcloud'] ? (
+                <span className={testResults['pcloud'].success ? 'text-emerald-400' : 'text-neutral-300'}>
+                  {testResults['pcloud'].message}
+                </span>
+              ) : pcloudStatus?.connected ? (
+                <span className="text-emerald-400">Conectado e validado com a API oficial do pCloud.</span>
+              ) : (
+                <span>Inicie a autorização OAuth ou execute o teste de conexão.</span>
+              )}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto">
+              {pcloudStatus?.connected ? (
+                <button
+                  type="button"
+                  onClick={handleDisconnectPCloud}
+                  className="px-3 py-1.5 text-xs font-medium text-rose-400 hover:text-rose-300 hover:bg-rose-950/40 border border-rose-900/50 rounded-lg transition-colors whitespace-nowrap"
+                >
+                  Desconectar pCloud
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleConnectPCloud}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-neutral-950 bg-cyan-400 hover:bg-cyan-300 rounded-lg transition-colors whitespace-nowrap shadow-sm"
+                >
+                  <Lock className="w-3.5 h-3.5" />
+                  <span>Autorizar pCloud</span>
+                </button>
+              )}
+
+              <button
+                type="button"
+                onClick={() => {
+                  const prov = providers.find(p => p.id === 'pcloud') || {
+                    id: 'pcloud',
+                    name: 'pCloud',
+                    status: 'not_configured',
+                    statusMessage: '',
+                    authMethod: 'oauth2',
+                    endpointDoc: '',
+                    settings: {},
+                    lastCheckTimestamp: null
+                  };
+                  handleTestConnection(prov);
+                }}
+                disabled={testingId === 'pcloud'}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-neutral-200 hover:text-white bg-neutral-800 hover:bg-neutral-700 disabled:opacity-50 rounded-lg transition-colors whitespace-nowrap"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${testingId === 'pcloud' ? 'animate-spin' : ''}`} />
+                <span>Testar Conexão</span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* 3. MEGA Card */}
         <div className="p-6 rounded-xl bg-neutral-900/70 border border-neutral-800/80 space-y-5">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="flex items-center gap-3">
