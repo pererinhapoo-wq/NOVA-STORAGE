@@ -307,13 +307,37 @@ pcloudRouter.get('/pcloud/auth-url', async (req: Request, res: Response) => {
  * - NUNCA expõe o access_token, client_secret ou PCLOUD_ADMIN_TOKEN no HTML, URL ou logs.
  * - Emite postMessage restrito à origem confiável do aplicativo e fecha a janela popup.
  */
+/**
+ * Mascara com segurança parâmetros sensíveis na URL para fins de diagnóstico
+ * Substitui os valores de code, state, token, secret por [MASKED] sem expor segredos.
+ */
+function maskSensitiveUrl(rawUrl?: string): string {
+  if (!rawUrl || typeof rawUrl !== 'string') return '';
+  return rawUrl.replace(/([?&])(code|state|token|access_token|refresh_token|secret|client_secret|auth)=([^&]*)/gi, '$1$2=[MASKED]');
+}
+
 pcloudRouter.get(['/pcloud/callback', '/pcloud/callback/', '/callback', '/callback/'], async (req: Request, res: Response) => {
   const code = typeof req.query.code === 'string' ? req.query.code.trim() : undefined;
   const state = typeof req.query.state === 'string' ? req.query.state.trim() : undefined;
   const oauthError = (req.query.error || req.query.error_description) as string | undefined;
   const trustedOrigin = PCloudService.getTrustedOrigin();
 
-  // Diagnóstico seguro: captura presença booleana e chaves dos parâmetros (NUNCA valores de segredos)
+  // Diagnóstico seguro de URL e parâmetros de entrada (NUNCA valores de segredos)
+  const incomingOriginalUrl = maskSensitiveUrl(req.originalUrl);
+  const incomingReqUrl = maskSensitiveUrl(req.url);
+  const requestPath = (req.originalUrl || req.url || '').split('?')[0];
+  const hasQueryString = Boolean((req.originalUrl || req.url || '').includes('?'));
+  const queryStringLength = (req.originalUrl || req.url || '').split('?')[1]?.length || 0;
+
+  let refererDomain: string | null = null;
+  if (req.headers.referer && typeof req.headers.referer === 'string') {
+    try {
+      refererDomain = new URL(req.headers.referer).hostname;
+    } catch {
+      refererDomain = 'invalid_referer_url';
+    }
+  }
+
   const rawQueryKeys = Object.keys(req.query || {});
   const sanitizedParamKeys = rawQueryKeys.map(k => String(k).replace(/[^\w-]/g, '')).filter(Boolean);
   const signedCookiePresent = Boolean(req.signedCookies?.[DriveAuthService.COOKIE_NAME]);
@@ -321,7 +345,13 @@ pcloudRouter.get(['/pcloud/callback', '/pcloud/callback/', '/callback', '/callba
   const hasState = Boolean(state);
   const hasError = Boolean(oauthError);
 
-  console.info('[NOVA STORAGE pCloud OAuth Callback] Diagnóstico Seguro de Parâmetros:', {
+  console.info('[NOVA STORAGE pCloud OAuth Callback] Diagnóstico Seguro de URL de Entrada:', {
+    requestPath,
+    hasQueryString,
+    queryStringLength,
+    incomingReqUrl,
+    incomingOriginalUrl,
+    refererDomain,
     hasCode,
     hasState,
     hasError,
@@ -408,6 +438,14 @@ pcloudRouter.get(['/pcloud/callback', '/pcloud/callback/', '/callback', '/callba
             
             <div class="diag-list">
               <div class="diag-item">
+                <span>Caminho da Requisição:</span>
+                <span class="tag-neutral">${String(requestPath).replace(/[<>&"']/g, '')}</span>
+              </div>
+              <div class="diag-item">
+                <span>Query String no Servidor:</span>
+                <span class="${hasQueryString ? 'tag-present' : 'tag-missing'}">${hasQueryString ? `Sim (${queryStringLength} chars)` : 'Não (0 chars)'}</span>
+              </div>
+              <div class="diag-item">
                 <span>Código OAuth (code):</span>
                 <span class="${hasCode ? 'tag-present' : 'tag-missing'}">${hasCode ? '✓ Presente' : '✗ Ausente'}</span>
               </div>
@@ -422,6 +460,10 @@ pcloudRouter.get(['/pcloud/callback', '/pcloud/callback/', '/callback', '/callba
               <div class="diag-item">
                 <span>Chaves na Query HTTP:</span>
                 <span class="tag-neutral">${receivedKeysFormatted}</span>
+              </div>
+              <div class="diag-item">
+                <span>Domínio Referer:</span>
+                <span class="tag-neutral">${refererDomain ? String(refererDomain).replace(/[<>&"']/g, '') : 'Nenhum'}</span>
               </div>
             </div>
 
