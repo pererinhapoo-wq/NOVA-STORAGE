@@ -144,33 +144,102 @@ mediaInspectRouter.post('/inspect-page', async (req, res) => {
     const directFormat = inferMediaFormat(trimmedUrl);
     if (directFormat !== 'UNKNOWN') {
       const probe = await probeMediaAccessibility(trimmedUrl);
+      // Se a resposta não for uma página HTML (ex.: página que usa parâmetro com nome de arquivo),
+      // trata diretamente como fluxo de mídia. Caso o probe indique HTML, segue para a extração da página.
+      if (!probe.isHtml) {
+        const directSource: ExtractedMediaSource = {
+          url: trimmedUrl,
+          format: directFormat,
+          mimeType: probe.mimeType,
+          discoveryMethod: 'direct_stream',
+          corsSupported: probe.corsSupported,
+          accessible: probe.accessible,
+          contentLengthBytes: probe.contentLengthBytes,
+          statusCode: probe.statusCode,
+          supportsRange: probe.supportsRange,
+          notes: probe.notes || 'Link direto de stream fornecido pelo usuário.'
+        };
+
+        const result: PageInspectionResult = {
+          pageUrl: trimmedUrl,
+          pageTitle: `Fluxo Direto de Mídia (${directFormat})`,
+          sourcesFound: [directSource],
+          detectedIframes: [],
+          dynamicMediaIndicators: [],
+          diagnostics: {
+            fetchTimeMs: Date.now() - startTime,
+            responseSizeBytes: 0,
+            redirectCount: 0,
+            detectedDrm: false,
+            detectedProtectionOrCaptcha: false,
+            detectedIframesCount: 0,
+            detectedDynamicLoading: false,
+            httpStatusCode: probe.statusCode,
+            contentType: probe.mimeType,
+            status: probe.accessible ? 'direct_source_accessible' : 'error',
+            summaryMessage: probe.accessible
+              ? probe.corsSupported
+                ? `Fonte direta de stream identificada e acessível (HTTP ${probe.statusCode || 200}${probe.supportsRange ? ' · Range 206 Ativo' : ''} · CORS Ativo).`
+                : `Fonte direta de stream identificada (HTTP ${probe.statusCode || 200}), mas sem cabeçalhos CORS declarados.`
+              : `O servidor remoto recusou o acesso direto (HTTP ${probe.statusCode || 'Inacessível'}). ${probe.notes || ''}`
+          }
+        };
+
+        return res.json({ success: true, result });
+      }
+    }
+
+    // 4. Busca segura da página HTML com limites de timeout (5s), tamanho (512 KB) e redirecionamentos (3)
+    const pageResponse = await safeFetchPageWithLimits(trimmedUrl, {
+      timeoutMs: 5000,
+      maxSizeBytes: 512 * 1024,
+      maxRedirects: 3
+    });
+
+    // 4.1 Se o Content-Type indicou diretamente um fluxo de mídia (vídeo ou áudio)
+    const lowerContentType = pageResponse.contentType.toLowerCase();
+    const isDirectMediaResponse =
+      pageResponse.isMediaStream ||
+      lowerContentType.startsWith('video/') ||
+      lowerContentType.startsWith('audio/') ||
+      lowerContentType.includes('application/vnd.apple.mpegurl') ||
+      lowerContentType.includes('application/x-mpegurl');
+
+    if (isDirectMediaResponse) {
+      const targetUrl = pageResponse.finalUrl || trimmedUrl;
+      const probe = await probeMediaAccessibility(targetUrl);
+      const streamFormat = inferMediaFormat(targetUrl, probe.mimeType || pageResponse.contentType);
+      const resolvedFormat = streamFormat !== 'UNKNOWN' ? streamFormat : 'MP4';
+
       const directSource: ExtractedMediaSource = {
-        url: trimmedUrl,
-        format: directFormat,
-        mimeType: probe.mimeType,
+        url: targetUrl,
+        format: resolvedFormat,
+        mimeType: probe.mimeType || pageResponse.contentType,
         discoveryMethod: 'direct_stream',
         corsSupported: probe.corsSupported,
         accessible: probe.accessible,
         contentLengthBytes: probe.contentLengthBytes,
-        statusCode: probe.statusCode,
+        statusCode: probe.statusCode || pageResponse.status,
         supportsRange: probe.supportsRange,
-        notes: probe.notes || 'Link direto de stream fornecido pelo usuário.'
+        notes: probe.notes || 'Fonte direta de mídia detectada pelo cabeçalho Content-Type.'
       };
 
       const result: PageInspectionResult = {
         pageUrl: trimmedUrl,
-        pageTitle: `Fluxo Direto de Mídia (${directFormat})`,
+        pageTitle: `Fluxo Direto de Mídia (${resolvedFormat})`,
         sourcesFound: [directSource],
         detectedIframes: [],
         dynamicMediaIndicators: [],
         diagnostics: {
           fetchTimeMs: Date.now() - startTime,
-          responseSizeBytes: 0,
-          redirectCount: 0,
+          responseSizeBytes: pageResponse.responseSizeBytes,
+          redirectCount: pageResponse.redirectCount,
           detectedDrm: false,
           detectedProtectionOrCaptcha: false,
           detectedIframesCount: 0,
           detectedDynamicLoading: false,
+          httpStatusCode: probe.statusCode || pageResponse.status,
+          contentType: pageResponse.contentType,
           status: probe.accessible ? 'direct_source_accessible' : 'error',
           summaryMessage: probe.accessible
             ? probe.corsSupported
@@ -182,13 +251,6 @@ mediaInspectRouter.post('/inspect-page', async (req, res) => {
 
       return res.json({ success: true, result });
     }
-
-    // 4. Busca segura da página HTML com limites de timeout (5s), tamanho (512 KB) e redirecionamentos (3)
-    const pageResponse = await safeFetchPageWithLimits(trimmedUrl, {
-      timeoutMs: 5000,
-      maxSizeBytes: 512 * 1024,
-      maxRedirects: 3
-    });
 
     const isHtml =
       pageResponse.contentType.includes('text/html') ||

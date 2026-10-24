@@ -21,6 +21,7 @@ export interface SafeFetchResult {
   headers: Record<string, string>;
   responseSizeBytes: number;
   redirectCount: number;
+  isMediaStream?: boolean;
 }
 
 /**
@@ -283,6 +284,40 @@ export async function safeFetchPageWithLimits(
 
       // 3. Lê o corpo da resposta respeitando o limite máximo de bytes
       const contentType = response.headers.get('content-type') || 'text/html';
+      const lowerContentType = contentType.toLowerCase();
+      const isMediaContent =
+        lowerContentType.startsWith('video/') ||
+        lowerContentType.startsWith('audio/') ||
+        lowerContentType.includes('application/vnd.apple.mpegurl') ||
+        lowerContentType.includes('application/x-mpegurl');
+
+      if (isMediaContent) {
+        const reader = response.body?.getReader();
+        if (reader) {
+          try {
+            await reader.cancel();
+          } catch {
+            // Ignora erro ao cancelar stream de mídia
+          }
+        }
+
+        const headersMap: Record<string, string> = {};
+        response.headers.forEach((v, k) => {
+          headersMap[k.toLowerCase()] = v;
+        });
+
+        return {
+          body: '',
+          finalUrl: currentUrl,
+          contentType,
+          status: response.status,
+          headers: headersMap,
+          responseSizeBytes: 0,
+          redirectCount,
+          isMediaStream: true
+        };
+      }
+
       const reader = response.body?.getReader();
 
       if (!reader) {

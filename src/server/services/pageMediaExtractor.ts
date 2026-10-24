@@ -102,6 +102,22 @@ function resolveUrlSafe(src: string, baseUrl: string): string | null {
 }
 
 /**
+ * Decodifica de forma segura valores de parâmetros URL, tolerando codificações simples ou duplas
+ */
+function safeDecodeParam(val: string): string {
+  try {
+    const once = decodeURIComponent(val);
+    try {
+      return decodeURIComponent(once);
+    } catch {
+      return once;
+    }
+  } catch {
+    return val;
+  }
+}
+
+/**
  * Infere o formato da mídia a partir da extensão da URL ou MIME type
  */
 export function inferMediaFormat(url: string, mimeType?: string): MediaFormat {
@@ -122,14 +138,16 @@ export function inferMediaFormat(url: string, mimeType?: string): MediaFormat {
     return 'WEBM';
   }
 
-  let pathToCheck = url.toLowerCase();
+  let parsed: URL | null = null;
+  let pathToCheck = (url || '').toLowerCase();
   try {
-    const parsed = new URL(url);
+    parsed = new URL(url);
     pathToCheck = parsed.pathname.toLowerCase();
   } catch {
     // Para URLs relativas ou caminhos locais sem protocolo/base
   }
 
+  // 1. Checagem direta pelo caminho principal da URL
   if (pathToCheck.includes('.m3u8')) {
     return 'HLS';
   }
@@ -140,6 +158,45 @@ export function inferMediaFormat(url: string, mimeType?: string): MediaFormat {
 
   if (pathToCheck.includes('.webm')) {
     return 'WEBM';
+  }
+
+  // 2. Se corresponder a uma regra cadastrada de URL intermediária (ex.: api.anivideo.net/videohls.php),
+  // o wrapper intermediário não deve ser inferido diretamente como arquivo de mídia na URL;
+  // ele deve ser tratado estruturadamente por extractIntermediateMediaDestination.
+  if (parsed && typeof findMatchingIntermediateRule === 'function' && findMatchingIntermediateRule(parsed)) {
+    return 'UNKNOWN';
+  }
+
+  // 3. Checagem em parâmetros de consulta (ex.: file, video, url, src, path, media, stream)
+  // ou na query string decodificada (URLs intermediárias, gateways PHP e CDNs assinadas)
+  if (parsed && parsed.search) {
+    // 3.1 Prioriza parâmetros comuns de mídia
+    const commonMediaParams = ['file', 'video', 'url', 'src', 'path', 'media', 'stream', 'uri', 'target'];
+    for (const param of commonMediaParams) {
+      const rawVal = parsed.searchParams.get(param);
+      if (rawVal) {
+        const decoded = safeDecodeParam(rawVal).toLowerCase();
+        if (/\.m3u8(?:$|[?#&])/i.test(decoded)) return 'HLS';
+        if (/\.mp4(?:$|[?#&])/i.test(decoded)) return 'MP4';
+        if (/\.webm(?:$|[?#&])/i.test(decoded)) return 'WEBM';
+      }
+    }
+
+    // 2.2 Varredura genérica em todos os parâmetros da query string
+    for (const [, rawVal] of parsed.searchParams.entries()) {
+      if (rawVal) {
+        const decoded = safeDecodeParam(rawVal).toLowerCase();
+        if (/\.m3u8(?:$|[?#&])/i.test(decoded)) return 'HLS';
+        if (/\.mp4(?:$|[?#&])/i.test(decoded)) return 'MP4';
+        if (/\.webm(?:$|[?#&])/i.test(decoded)) return 'WEBM';
+      }
+    }
+
+    // 2.3 Varredura na query string completa decodificada (caso haja parâmetros codificados aninhados)
+    const fullDecodedSearch = safeDecodeParam(parsed.search).toLowerCase();
+    if (/\.m3u8(?:$|[?#&])/i.test(fullDecodedSearch)) return 'HLS';
+    if (/\.mp4(?:$|[?#&])/i.test(fullDecodedSearch)) return 'MP4';
+    if (/\.webm(?:$|[?#&])/i.test(fullDecodedSearch)) return 'WEBM';
   }
 
   return 'UNKNOWN';
@@ -1003,6 +1060,7 @@ export async function probeMediaAccessibility(
   supportsRange?: boolean;
   notes?: string;
   finalUrl?: string;
+  isHtml?: boolean;
 }> {
   const maxRedirects = options?.maxRedirects ?? 3;
   const timeoutMs = options?.timeoutMs ?? 4000;
@@ -1059,15 +1117,22 @@ export async function probeMediaAccessibility(
 
       const corsHeader = response.headers.get('access-control-allow-origin');
       const corsSupported = typeof corsHeader === 'string' && corsHeader.length > 0;
-      const accessible = response.status >= 200 && response.status < 400;
       const contentLength = response.headers.get('content-length');
       const mimeType = response.headers.get('content-type') || undefined;
+      const lowerMime = (mimeType || '').toLowerCase();
+      const isHtml = Boolean(
+        lowerMime.includes('text/html') ||
+        lowerMime.includes('application/xhtml+xml')
+      );
+      const accessible = (response.status >= 200 && response.status < 400) && !isHtml;
       const acceptRanges = response.headers.get('accept-ranges');
       const contentRange = response.headers.get('content-range');
       const supportsRange = response.status === 206 || acceptRanges === 'bytes' || Boolean(contentRange);
 
       let notes = '';
-      if (response.status === 403) {
+      if (isHtml) {
+        notes = `O servidor respondeu com uma página HTML (Content-Type: ${mimeType || 'text/html'}) e não com um fluxo de mídia direto.`;
+      } else if (response.status === 403) {
         notes = `Acesso negado (HTTP 403 Forbidden). O arquivo é privado ou o servidor recusou a requisição anônima (Content-Type: ${mimeType || 'desconhecido'}).`;
       } else if (response.status === 404) {
         notes = 'Arquivo não encontrado (HTTP 404 Not Found). O link de mídia pode estar expirado ou inativo.';
@@ -1087,7 +1152,8 @@ export async function probeMediaAccessibility(
         mimeType,
         supportsRange,
         notes,
-        finalUrl: currentUrl
+        finalUrl: currentUrl,
+        isHtml
       };
     } catch (err: any) {
       clearTimeout(timeoutId);
