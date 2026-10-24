@@ -252,7 +252,17 @@ pcloudRouter.get('/pcloud/auth-url', async (req: Request, res: Response) => {
     }
   }
 
-  if (auth.role !== 'admin') {
+  // Apenas sessões explicitamente restritas a visualizador ('viewer') são impedidas
+  if (auth.session?.role === 'viewer') {
+    return res.status(403).json({
+      success: false,
+      code: 'FORBIDDEN',
+      message: 'Apenas administradores autorizados podem iniciar a autorização OAuth do pCloud.'
+    });
+  }
+
+  // Se o método de autenticação for Bearer token, exige token com privilégios de administrador
+  if (auth.authMethod === 'bearer_token' && auth.role !== 'admin') {
     return res.status(403).json({
       success: false,
       code: 'FORBIDDEN',
@@ -264,9 +274,9 @@ pcloudRouter.get('/pcloud/auth-url', async (req: Request, res: Response) => {
     let session = auth.session;
     if (!session) {
       session = await DriveAuthService.getOrInitSession(req, res);
-      session.role = 'admin';
-      await DriveAuthService.saveSession(session);
     }
+    session.role = 'admin';
+    await DriveAuthService.saveSession(session);
 
     const { authUrl, state, redirectUri, trustedOrigin } = await PCloudService.generateOAuthUrl(session);
 

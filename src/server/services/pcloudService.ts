@@ -583,6 +583,7 @@ export class PCloudService {
       hostname: exchangeResult.hostname,
       connectedAt: new Date().toISOString()
     };
+    session.role = 'admin';
     session.lastActivityAt = Date.now();
 
     await DriveAuthService.saveSession(session);

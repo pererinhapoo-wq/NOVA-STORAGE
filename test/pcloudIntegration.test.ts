@@ -1158,6 +1158,115 @@ test('Conexão OAuth 2.0 Oficial do pCloud na NOVA STORAGE', async (t) => {
     });
   });
 
+  await t.test('1.7 Cenário real da Vercel: Sessão inicial de navegador (role undefined) consegue iniciar OAuth e é promovida a admin', async () => {
+    // Simula a sessão inicial do navegador criada por getOrInitSession na Vercel
+    const browserSession = await DriveAuthService.createSession();
+    assert.strictEqual(browserSession.role, undefined, 'Sessão recém-criada inicia sem role explícito');
+
+    await new Promise<void>((resolve) => {
+      let statusCode = 200;
+      const fakeReq: any = {
+        method: 'GET',
+        url: '/pcloud/auth-url',
+        headers: {
+          'x-nova-client': 'storage-v1',
+          'origin': TRUSTED_ORIGIN
+        },
+        signedCookies: { [DriveAuthService.COOKIE_NAME]: browserSession.id }
+      };
+      const fakeRes: any = {
+        status(code: number) {
+          statusCode = code;
+          return this;
+        },
+        async json(data: any) {
+          assert.strictEqual(statusCode, 200, 'Não deve falhar com 401 ou 403 para sessão legítima do navegador');
+          assert.ok(data?.url);
+          assert.ok(data?.state);
+          assert.strictEqual(data.redirectUri, `${TRUSTED_ORIGIN}/api/storage/pcloud/callback`);
+
+          // Verifica se a sessão foi atualizada para role 'admin' e o CSRF state persistido
+          const updatedSession = await DriveAuthService.getValidSession(browserSession.id);
+          assert.strictEqual(updatedSession?.role, 'admin', 'Sessão do operador deve ser reconhecida e gravada como admin');
+          assert.strictEqual(updatedSession?.pcloudCsrfState, data.state);
+
+          resolve();
+          return this;
+        }
+      };
+      pcloudRouter(fakeReq, fakeRes, () => resolve());
+    });
+  });
+
+  await t.test('1.8 Cenário real da Vercel: Sessão com Google Drive conectado consegue iniciar OAuth do pCloud', async () => {
+    // Simula sessão em que o operador já conectou o Google Drive no painel
+    const driveSession = await DriveAuthService.createSession();
+    driveSession.userEmail = 'admin@novastorage.io';
+    driveSession.tokens = {
+      access_token: 'google_oauth_token_abc',
+      refresh_token: 'google_refresh_token_def',
+      scope: DriveAuthService.REQUIRED_SCOPE
+    };
+    await DriveAuthService.saveSession(driveSession);
+
+    await new Promise<void>((resolve) => {
+      let statusCode = 200;
+      const fakeReq: any = {
+        method: 'GET',
+        url: '/pcloud/auth-url',
+        headers: {
+          'x-nova-client': 'storage-v1',
+          'origin': TRUSTED_ORIGIN
+        },
+        signedCookies: { [DriveAuthService.COOKIE_NAME]: driveSession.id }
+      };
+      const fakeRes: any = {
+        status(code: number) {
+          statusCode = code;
+          return this;
+        },
+        async json(data: any) {
+          assert.strictEqual(statusCode, 200, 'Operador com Google Drive deve conseguir iniciar OAuth do pCloud');
+          assert.ok(data?.url);
+          assert.ok(data?.state);
+
+          const updatedSession = await DriveAuthService.getValidSession(driveSession.id);
+          assert.strictEqual(updatedSession?.role, 'admin');
+          assert.strictEqual(updatedSession?.pcloudCsrfState, data.state);
+
+          resolve();
+          return this;
+        }
+      };
+      pcloudRouter(fakeReq, fakeRes, () => resolve());
+    });
+  });
+
+  await t.test('1.9 Sessão com tokens pCloud conectados é reconhecida como administradora em authenticatePCloudRequest', async () => {
+    const sessionWithPcloud = await DriveAuthService.createSession();
+    sessionWithPcloud.pcloudTokens = {
+      accessToken: 'valid_connected_pcloud_token',
+      userId: 123456,
+      locationId: 1,
+      hostname: 'api.pcloud.com',
+      connectedAt: new Date().toISOString()
+    };
+    await DriveAuthService.saveSession(sessionWithPcloud);
+
+    const { authenticatePCloudRequest } = await import('../src/server/services/pcloudAuthService.ts');
+    const fakeReq: any = {
+      headers: {
+        'x-nova-client': 'storage-v1',
+        'origin': TRUSTED_ORIGIN
+      },
+      signedCookies: { [DriveAuthService.COOKIE_NAME]: sessionWithPcloud.id }
+    };
+
+    const auth = await authenticatePCloudRequest(fakeReq);
+    assert.strictEqual(auth.authenticated, true);
+    assert.strictEqual(auth.role, 'admin', 'Sessão com tokens do pCloud deve ter papel admin');
+  });
+
   // --------------------------------------------------------------------------
   // 2. Rota de Callback: GET /api/storage/pcloud/callback
   // --------------------------------------------------------------------------

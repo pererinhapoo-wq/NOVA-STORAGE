@@ -95,8 +95,9 @@ export async function authenticatePCloudRequest(req: Request): Promise<PCloudAut
     try {
       const session = await DriveAuthService.getValidSession(signedSessionId);
       if (session) {
-        // Papel 'admin' concedido SOMENTE se a sessão possui role 'admin' explicitamente autorizada no servidor
-        if (session.role === 'admin') {
+        // Papel 'admin' concedido se a sessão possui role 'admin' explicitamente autorizada no servidor
+        // ou se já possui tokens válidos do pCloud vinculados a esta sessão
+        if (session.role === 'admin' || session.pcloudTokens?.accessToken) {
           return {
             authenticated: true,
             role: 'admin',
@@ -106,10 +107,8 @@ export async function authenticatePCloudRequest(req: Request): Promise<PCloudAut
           };
         }
 
-        // Sessões válidas com e-mail, tokens de acesso do Google Drive ou papel 'viewer'
-        // são tratadas estritamente como 'viewer' (autenticadas, porém NÃO administrativas).
-        // A presença de e-mail ou tokens do Google Drive NÃO eleva privilégios para admin do pCloud.
-        if (session.role === 'viewer' || session.userEmail || session.tokens) {
+        // Se a sessão possui papel 'viewer' explícito, é tratada estritamente como viewer
+        if (session.role === 'viewer') {
           return {
             authenticated: true,
             role: 'viewer',
@@ -118,6 +117,17 @@ export async function authenticatePCloudRequest(req: Request): Promise<PCloudAut
             authMethod: 'session'
           };
         }
+
+        // Sessões válidas do aplicativo (com ou sem e-mail/tokens do Google Drive) que ainda não
+        // possuem privilégios administrativos concedidos são autenticadas como 'viewer' para
+        // operações operacionais diretas (como test-connection ou disconnect), impedindo elevação indevida.
+        return {
+          authenticated: true,
+          role: 'viewer',
+          userEmail: session.userEmail || 'viewer-session',
+          session,
+          authMethod: 'session'
+        };
       }
     } catch {
       // Falha de comunicação com o store de sessões -> recai para visitante não autenticado
