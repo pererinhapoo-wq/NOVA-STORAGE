@@ -4,7 +4,7 @@ export type VideoContainer = 'MKV' | 'MP4' | 'WEBM' | 'AVI' | 'TS';
 
 export type VideoCodec = 'HEVC / H.265' | 'AVC / H.264' | 'AV1' | 'VP9';
 
-export type ProviderType = 'google_drive' | 'mega' | 's3_compatible' | 'local_fs';
+export type ProviderType = 'google_drive' | 'mega' | 'pcloud' | 's3_compatible' | 'local_fs';
 
 export type ProviderStatus = 'not_configured' | 'pending_credentials' | 'testing' | 'connected' | 'error';
 

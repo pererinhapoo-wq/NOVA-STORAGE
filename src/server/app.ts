@@ -4,6 +4,7 @@ import cookieParser from 'cookie-parser';
 import { healthRouter } from './routes/health.ts';
 import { driveRouter } from './routes/drive.ts';
 import { mediaInspectRouter } from './routes/mediaInspect.ts';
+import { pcloudRouter } from './routes/pcloud.ts';
 import { getEffectiveCookieSecret, resolveSessionSecret } from './utils/sessionSecret.ts';
 
 dotenv.config();
@@ -43,6 +44,9 @@ app.use('/api', healthRouter);
 
 // Media inspection route with SSRF protection (does not require Drive OAuth credentials)
 app.use('/api/storage', mediaInspectRouter);
+
+// pCloud storage route (uses server-side PCLOUD_ACCESS_TOKEN, decoupled from Drive OAuth and Redis)
+app.use('/api/storage', pcloudRouter);
 
 // Middleware for storage routes: validates production SESSION_SECRET and Upstash config with controlled HTTP response
 app.use('/api/storage', (req, res, next) => {

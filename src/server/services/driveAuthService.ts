@@ -15,6 +15,18 @@ export interface UserSessionData {
   lastVerifiedAt: string | null;
   lastActivityAt: number;
   createdAt: number;
+  role?: 'admin' | 'viewer' | 'guest';
+  authorizedFileIds?: string[];
+  pcloudCsrfState?: string | null;
+  pcloudCsrfExpiresAt?: number | null;
+  pcloudTokens?: {
+    accessToken: string;
+    tokenType?: string;
+    userId?: number;
+    locationId?: number;
+    hostname?: string;
+    connectedAt?: string;
+  } | null;
 }
 
 export interface IRedisClient {
@@ -34,6 +46,8 @@ const CSRF_TTL_MS = 10 * 60 * 1000;
 const REDIS_KEY_PREFIX = 'nova:session:';
 
 export class DriveAuthService {
+  public static readonly COOKIE_NAME = 'nova_session_id';
+
   // Required scope: Read-only access to files and metadata
   // Explanatory note: 'drive.readonly' is strictly read-only, preventing any accidental write/delete
   // while allowing NOVA STORAGE to index file names, sizes, checksums, and stream video content.
@@ -195,6 +209,10 @@ export class DriveAuthService {
       session.csrfState = null;
       session.csrfExpiresAt = null;
     }
+    if (session.pcloudCsrfExpiresAt && now > session.pcloudCsrfExpiresAt) {
+      session.pcloudCsrfState = null;
+      session.pcloudCsrfExpiresAt = null;
+    }
 
     // Update activity timestamp and refresh Redis TTL
     session.lastActivityAt = now;
@@ -206,6 +224,32 @@ export class DriveAuthService {
     }
 
     return session;
+  }
+
+  /**
+   * Retrieves the validated session from Upstash Redis or initializes a new secure signed session
+   */
+  public static async getOrInitSession(req: any, res: any): Promise<UserSessionData> {
+    const signedSessionId = req.signedCookies?.[this.COOKIE_NAME];
+
+    if (signedSessionId && typeof signedSessionId === 'string') {
+      const existingSession = await this.getValidSession(signedSessionId);
+      if (existingSession) {
+        return existingSession;
+      }
+    }
+
+    const newSession = await this.createSession();
+    res.cookie(this.COOKIE_NAME, newSession.id, {
+      signed: true,
+      httpOnly: true,
+      secure: true,
+      sameSite: 'none',
+      path: '/',
+      maxAge: SESSION_TTL_MS
+    });
+
+    return newSession;
   }
 
   /**
@@ -226,7 +270,10 @@ export class DriveAuthService {
       connectedAt: null,
       lastVerifiedAt: null,
       lastActivityAt: now,
-      createdAt: now
+      createdAt: now,
+      pcloudCsrfState: null,
+      pcloudCsrfExpiresAt: null,
+      pcloudTokens: null
     };
 
     await this.saveSession(newSession);
