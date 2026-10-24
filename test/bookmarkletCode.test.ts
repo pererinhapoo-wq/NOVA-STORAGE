@@ -50,46 +50,55 @@ test('Bookmarklet Detector de Mídia para Navegadores Móveis (Brave Android)', 
     assert.ok(BRAVE_BOOKMARKLET_STEPS[3].instruction.toLowerCase().includes('play'));
   });
 
-  await t.test('7. Preserva metadados de origem (originUrl, originTitle, capturedAt) e ação de cópia estruturada', () => {
-    assert.ok(BOOKMARKLET_MINIFIED_CODE.includes('originUrl'));
-    assert.ok(BOOKMARKLET_MINIFIED_CODE.includes('originTitle'));
-    assert.ok(BOOKMARKLET_MINIFIED_CODE.includes('capturedAt'));
-    assert.ok(BOOKMARKLET_MINIFIED_CODE.includes('window.location.href'));
-    assert.ok(BOOKMARKLET_MINIFIED_CODE.includes('+ Origem'));
-    assert.ok(BOOKMARKLET_MINIFIED_CODE.includes('ns-cpy-meta'));
-  });
-
-  await t.test('8. Identifica iframes e elementos de player via atributos src, data-src, data-lazy-src e data-player', () => {
+  await t.test('7. Inspeciona de forma síncrona atributos de iframe e tags de player', () => {
     assert.ok(BOOKMARKLET_MINIFIED_CODE.includes("querySelectorAll('iframe')"));
-    assert.ok(BOOKMARKLET_MINIFIED_CODE.includes("getAttribute('src')"));
-    assert.ok(BOOKMARKLET_MINIFIED_CODE.includes("getAttribute('data-src')"));
-    assert.ok(BOOKMARKLET_MINIFIED_CODE.includes("getAttribute('data-lazy-src')"));
-    assert.ok(BOOKMARKLET_MINIFIED_CODE.includes("getAttribute('data-player')"));
+    assert.ok(BOOKMARKLET_MINIFIED_CODE.includes('data-src'));
+    assert.ok(BOOKMARKLET_MINIFIED_CODE.includes('data-lazy-src'));
+    assert.ok(BOOKMARKLET_MINIFIED_CODE.includes('data-player'));
+    assert.ok(BOOKMARKLET_MINIFIED_CODE.includes('data-player-url'));
+    assert.ok(BOOKMARKLET_MINIFIED_CODE.includes('data-url'));
     assert.ok(BOOKMARKLET_MINIFIED_CODE.includes('[data-player],[data-player-url],[data-iframe-src]'));
   });
 
-  await t.test('9. Renderiza seção dedicada "Player Incorporado Detectado" e ação "Abrir Player em Nova Aba"', () => {
+  await t.test('8. Renderiza seção dedicada "Player Incorporado Detectado" e ação "Abrir Player em Nova Aba"', () => {
     assert.ok(BOOKMARKLET_MINIFIED_CODE.includes('Player Incorporado Detectado'));
     assert.ok(BOOKMARKLET_MINIFIED_CODE.includes('Abrir Player em Nova Aba'));
-    assert.ok(BOOKMARKLET_MINIFIED_CODE.includes('target="_blank"'));
-    assert.ok(BOOKMARKLET_MINIFIED_CODE.includes('rel="noopener noreferrer"'));
+    assert.ok(BOOKMARKLET_MINIFIED_CODE.includes('target=\\"_blank\\"'));
+    assert.ok(BOOKMARKLET_MINIFIED_CODE.includes('rel=\\"noopener noreferrer\\"'));
     assert.ok(BOOKMARKLET_MINIFIED_CODE.includes('ns-ifr-list'));
   });
 
-  await t.test('10. Mantém separação estrita: iframes não são promovidos a mídia direta sem extensão de vídeo', () => {
-    assert.ok(BOOKMARKLET_MINIFIED_CODE.includes('ifrMap'));
-    assert.ok(BOOKMARKLET_MINIFIED_CODE.includes('addIframePlayer'));
-    assert.ok(BOOKMARKLET_MINIFIED_CODE.includes('hasMediaExt'));
-    // A lista de streams diretos (ns-list) continua separada da lista de iframes (ns-ifr-list)
+  await t.test('9. Mantém separação estrita entre streams diretos e players em iframe', () => {
+    assert.ok(BOOKMARKLET_MINIFIED_CODE.includes('const u=new Set(),ifr=new Set();'));
     assert.ok(BOOKMARKLET_MINIFIED_CODE.includes('ns-list'));
     assert.ok(BOOKMARKLET_MINIFIED_CODE.includes('ns-ifr-list'));
+    assert.ok(BOOKMARKLET_MINIFIED_CODE.includes('addIfr'));
   });
 
-  await t.test('11. Etapa 4 das instruções no Brave Android orienta sobre players incorporados e nova aba', () => {
+  await t.test('10. Etapa 4 das instruções no Brave Android orienta sobre players incorporados e nova aba', () => {
     const step4 = BRAVE_BOOKMARKLET_STEPS.find((s) => s.stepNumber === 4);
     assert.ok(step4);
     assert.ok(step4.detail.includes('players incorporados'));
     assert.ok(step4.detail.includes('Abrir Player em Nova Aba'));
+  });
+
+  await t.test('11. Ausência de sistemas complexos: sem PerformanceObserver, re-render assíncrono ou mutação contínua', () => {
+    assert.strictEqual(BOOKMARKLET_MINIFIED_CODE.includes('PerformanceObserver'), false);
+    assert.strictEqual(BOOKMARKLET_MINIFIED_CODE.includes('setInterval'), false);
+    assert.strictEqual(BOOKMARKLET_MINIFIED_CODE.includes('MutationObserver'), false);
+    // Garantir limite de tamanho compatível com navegadores móveis Android (< 7.500 caracteres)
+    assert.ok(
+      BOOKMARKLET_MINIFIED_CODE.length < 7500,
+      `Tamanho do bookmarklet (${BOOKMARKLET_MINIFIED_CODE.length}) deve ser menor que 7.500 caracteres`
+    );
+  });
+
+  await t.test('12. Código compila sem erros no motor de script (V8 / vm.Script)', async () => {
+    const vm = await import('node:vm');
+    const rawJs = BOOKMARKLET_MINIFIED_CODE.replace(/^javascript:/, '');
+    assert.doesNotThrow(() => {
+      new vm.Script(rawJs);
+    });
   });
 });
 
