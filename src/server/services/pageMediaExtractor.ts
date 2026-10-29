@@ -118,14 +118,22 @@ function safeDecodeParam(val: string): string {
 }
 
 /**
- * Infere o formato da mídia a partir da extensão da URL ou MIME type
+ * Infere o formato da mídia a partir da extensão da URL, MIME type ou amostra de conteúdo
  */
-export function inferMediaFormat(url: string, mimeType?: string): MediaFormat {
+export function inferMediaFormat(
+  url: string,
+  mimeType?: string,
+  contentSample?: string
+): MediaFormat {
   const lowerMime = (mimeType || '').toLowerCase();
 
+  // 1. Verificação explícita por tipo MIME de streaming HLS reconhecido
   if (
     lowerMime.includes('application/x-mpegurl') ||
-    lowerMime.includes('vnd.apple.mpegurl')
+    lowerMime.includes('vnd.apple.mpegurl') ||
+    lowerMime.includes('application/mpegurl') ||
+    lowerMime.includes('audio/x-mpegurl') ||
+    lowerMime.includes('audio/mpegurl')
   ) {
     return 'HLS';
   }
@@ -138,6 +146,26 @@ export function inferMediaFormat(url: string, mimeType?: string): MediaFormat {
     return 'WEBM';
   }
 
+  // 2. Verificação pelo conteúdo real recebido (se fornecido)
+  if (contentSample && typeof contentSample === 'string') {
+    const trimmed = contentSample.trim();
+    // Se a amostra for um documento HTML ou resposta de erro, não é fluxo de mídia
+    if (
+      trimmed.startsWith('<!DOCTYPE') ||
+      trimmed.startsWith('<!doctype') ||
+      trimmed.startsWith('<html') ||
+      trimmed.includes('<html') ||
+      trimmed.includes('<body')
+    ) {
+      return 'UNKNOWN';
+    }
+
+    // Manifestos HLS legítimos obrigatoriamente iniciam com a diretiva #EXTM3U
+    if (trimmed.startsWith('#EXTM3U')) {
+      return 'HLS';
+    }
+  }
+
   let parsed: URL | null = null;
   let pathToCheck = (url || '').toLowerCase();
   try {
@@ -147,7 +175,7 @@ export function inferMediaFormat(url: string, mimeType?: string): MediaFormat {
     // Para URLs relativas ou caminhos locais sem protocolo/base
   }
 
-  // 1. Checagem direta pelo caminho principal da URL
+  // 3. Checagem direta pelo caminho principal da URL
   if (pathToCheck.includes('.m3u8')) {
     return 'HLS';
   }
@@ -160,7 +188,7 @@ export function inferMediaFormat(url: string, mimeType?: string): MediaFormat {
     return 'WEBM';
   }
 
-  // 2. Se corresponder a uma regra cadastrada de URL intermediária (ex.: api.anivideo.net/videohls.php),
+  // 4. Se corresponder a uma regra cadastrada de URL intermediária (ex.: api.anivideo.net/videohls.php),
   // o wrapper intermediário não deve ser inferido diretamente como arquivo de mídia na URL;
   // ele deve ser tratado estruturadamente por extractIntermediateMediaDestination.
   if (parsed && typeof findMatchingIntermediateRule === 'function' && findMatchingIntermediateRule(parsed)) {
@@ -602,6 +630,18 @@ export function determineInspectionStatus(params: {
       status: 'drm_or_protected',
       summaryMessage: 'Proteção DRM proprietária detectada (ex: Widevine/FairPlay). O conteúdo está protegido contra reprodução direta externa.',
       diagnosticDetails: ['Indícios de APIs de proteção DRM de navegadores (EME / requestMediaKeySystemAccess).']
+    };
+  }
+
+  // Tratamento explícito de resposta de erro HTTP 521 da CDN
+  if (params.httpStatusCode === 521) {
+    details.push('O servidor remoto respondeu com HTTP 521 (Web Server Is Down via Cloudflare).');
+    details.push('A camada de borda da CDN não conseguiu estabelecer comunicação com o servidor de origem.');
+    details.push('Nenhum dado binário de vídeo ou manifesto foi recebido.');
+    return {
+      status: 'error',
+      summaryMessage: 'Servidor de borda/CDN indisponível (HTTP 521: Web Server Is Down). O servidor de origem da mídia não pôde ser alcançado.',
+      diagnosticDetails: details
     };
   }
 
@@ -1061,6 +1101,9 @@ export async function probeMediaAccessibility(
   notes?: string;
   finalUrl?: string;
   isHtml?: boolean;
+  isHlsPlaylist?: boolean;
+  contentSample?: string;
+  mediaFormat?: MediaFormat;
 }> {
   const maxRedirects = options?.maxRedirects ?? 3;
   const timeoutMs = options?.timeoutMs ?? 4000;
@@ -1088,9 +1131,9 @@ export async function probeMediaAccessibility(
       const response = await fetch(currentUrl, {
         method: 'GET',
         headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 NOVA-STORAGE-Inspector/1.0',
-          'Range': 'bytes=0-1024',
-          'Origin': 'https://ais-dev-4wcm7llj3mzvxq3xdjjq3o-46161797005.us-east1.run.app'
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          'Accept': 'application/x-mpegURL, application/vnd.apple.mpegurl, video/*, text/html;q=0.9, */*;q=0.8',
+          'Range': 'bytes=0-1024'
         },
         redirect: 'manual',
         signal: controller.signal
@@ -1115,19 +1158,76 @@ export async function probeMediaAccessibility(
         continue;
       }
 
+      // Trata explicitamente resposta HTTP 521 (Cloudflare: Web server is down)
+      if (response.status === 521) {
+        return {
+          accessible: false,
+          corsSupported: false,
+          statusCode: 521,
+          mimeType: response.headers.get('content-type') || 'text/html; charset=UTF-8',
+          supportsRange: false,
+          notes: 'Erro HTTP 521 (Web Server Is Down via Cloudflare): O servidor de borda da CDN não conseguiu estabelecer comunicação com a origem.',
+          finalUrl: currentUrl,
+          isHtml: true,
+          isHlsPlaylist: false
+        };
+      }
+
       const corsHeader = response.headers.get('access-control-allow-origin');
       const corsSupported = typeof corsHeader === 'string' && corsHeader.length > 0;
       const contentLength = response.headers.get('content-length');
       const mimeType = response.headers.get('content-type') || undefined;
       const lowerMime = (mimeType || '').toLowerCase();
-      const isHtml = Boolean(
+      const isHtmlMime = Boolean(
         lowerMime.includes('text/html') ||
         lowerMime.includes('application/xhtml+xml')
       );
+
+      // Lê uma pequena amostra do corpo (até 1024 bytes) para validar conteúdo real sem baixar todo o arquivo
+      let bodySample = '';
+      try {
+        const reader = response.body?.getReader();
+        if (reader) {
+          const { value } = await reader.read();
+          if (value) {
+            bodySample = new TextDecoder('utf-8', { fatal: false }).decode(value.slice(0, 1024));
+          }
+          try {
+            await reader.cancel();
+          } catch {
+            // Ignora erro ao cancelar leitura restante
+          }
+        }
+      } catch {
+        // Ignora erros ao ler amostra do stream
+      }
+
+      const isHtmlBody =
+        /^\s*<(?:!doctype\s+html|html|head|body|div)/i.test(bodySample) ||
+        bodySample.includes('<html') ||
+        bodySample.includes('<!DOCTYPE html') ||
+        bodySample.includes('<!doctype html');
+
+      const isHtml = isHtmlMime || isHtmlBody;
+
+      // Um manifesto HLS legítimo obrigatoriamente começa com a diretiva #EXTM3U ou possui MIME type de mpegurl
+      const startsWithExtM3u = bodySample.trim().startsWith('#EXTM3U');
+      const isHlsMime = Boolean(
+        lowerMime.includes('application/x-mpegurl') ||
+        lowerMime.includes('vnd.apple.mpegurl') ||
+        lowerMime.includes('application/mpegurl') ||
+        lowerMime.includes('audio/x-mpegurl') ||
+        lowerMime.includes('audio/mpegurl')
+      );
+      const isHlsPlaylist = !isHtml && (startsWithExtM3u || isHlsMime);
+
       const accessible = (response.status >= 200 && response.status < 400) && !isHtml;
       const acceptRanges = response.headers.get('accept-ranges');
       const contentRange = response.headers.get('content-range');
       const supportsRange = response.status === 206 || acceptRanges === 'bytes' || Boolean(contentRange);
+
+      const inferred = inferMediaFormat(currentUrl, mimeType, bodySample);
+      const mediaFormat: MediaFormat = isHlsPlaylist ? 'HLS' : inferred;
 
       let notes = '';
       if (isHtml) {
@@ -1137,9 +1237,10 @@ export async function probeMediaAccessibility(
       } else if (response.status === 404) {
         notes = 'Arquivo não encontrado (HTTP 404 Not Found). O link de mídia pode estar expirado ou inativo.';
       } else if (accessible) {
+        const formatText = isHlsPlaylist ? 'Playlist HLS confirmada (#EXTM3U)' : (mimeType || 'mídia');
         const rangeText = supportsRange ? 'Suporta Range (206 Partial Content)' : 'Sem Range parcial explícito';
         const corsText = corsSupported ? 'CORS Habilitado' : 'Sem CORS Declarado';
-        notes = `HTTP ${response.status} (${mimeType || 'mídia'}) · ${rangeText} · ${corsText}.`;
+        notes = `HTTP ${response.status} (${formatText}) · ${rangeText} · ${corsText}.`;
       } else {
         notes = `Servidor respondeu com código HTTP ${response.status}.`;
       }
@@ -1153,7 +1254,10 @@ export async function probeMediaAccessibility(
         supportsRange,
         notes,
         finalUrl: currentUrl,
-        isHtml
+        isHtml,
+        isHlsPlaylist,
+        contentSample: bodySample,
+        mediaFormat
       };
     } catch (err: any) {
       clearTimeout(timeoutId);

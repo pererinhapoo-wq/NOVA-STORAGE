@@ -274,7 +274,14 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
 
     const videoEl = videoRef.current;
     const mediaUrl = activeSource.url;
-    const isHls = activeSource.format === 'HLS' || mediaUrl.includes('.m3u8');
+    const isHls =
+      activeSource.format === 'HLS' ||
+      mediaUrl.toLowerCase().includes('.m3u8') ||
+      Boolean(
+        activeSource.mimeType &&
+          (activeSource.mimeType.toLowerCase().includes('mpegurl') ||
+           activeSource.mimeType.toLowerCase().includes('vnd.apple.mpegurl'))
+      );
 
     const updateDimensions = () => {
       if (videoEl && videoEl.videoWidth > 0 && videoEl.videoHeight > 0) {
@@ -309,8 +316,10 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
         hls.on(Hls.Events.ERROR, (_event, data) => {
           const code = data.response?.code;
           let msg = 'Erro ao carregar o stream HLS remoto.';
-          if (code === 403) {
-            msg = 'HTTP 403 Forbidden: O servidor remoto exige autenticação, token temporário ou bloqueou o Referer.';
+          if (code === 521) {
+            msg = 'HTTP 521 Web Server Is Down: A CDN Cloudflare não conseguiu conectar ao servidor de origem do stream.';
+          } else if (code === 403) {
+            msg = 'HTTP 403 Forbidden: O servidor remoto exige autenticação, token temporário ou bloqueou o Referer/Origin.';
           } else if (code === 404) {
             msg = 'HTTP 404 Not Found: O arquivo de manifesto HLS não existe mais no servidor remoto.';
           } else if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
@@ -320,7 +329,7 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
           if (data.fatal) {
             setPlaybackState('error');
             setPlaybackErrorDetail(msg);
-            setBrowserErrorCode(code === 403 ? 403 : 2);
+            setBrowserErrorCode(code ? code : 2);
             hls.destroy();
           }
         });
@@ -1265,7 +1274,7 @@ export const ExternalMediaTester: React.FC<ExternalMediaTesterProps> = ({ onNoti
                   </span>
                   <span className="text-neutral-600">·</span>
                   <span className="text-neutral-500">
-                    {activeSource.format === 'HLS' ? 'Hls.js Engine Ativa' : 'HTML5 Nativo'}
+                    {activeSource.format === 'HLS' || activeSource.url.toLowerCase().includes('.m3u8') ? 'Hls.js Engine Ativa' : 'HTML5 Nativo'}
                   </span>
                 </div>
               </div>
